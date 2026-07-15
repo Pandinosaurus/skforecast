@@ -1,4 +1,4 @@
-################################################################################
+﻿################################################################################
 #                     skforecast.model_selection._search                       #
 #                                                                              #
 # This work by skforecast team is licensed under the BSD 3-Clause License.     #
@@ -16,13 +16,14 @@ import pandas as pd
 from tqdm.auto import tqdm
 import optuna
 from optuna.samplers import TPESampler
+from optuna.trial import TrialState
 from sklearn.model_selection import ParameterGrid, ParameterSampler
 from ..exceptions import warn_skforecast_categories
 from ..model_selection._split import TimeSeriesFold, OneStepAheadFold
 from ..model_selection._validation import (
     backtesting_forecaster, 
     backtesting_forecaster_multiseries,
-    backtesting_sarimax
+    backtesting_stats
 )
 from ..metrics import add_y_train_argument, _get_metric
 from ..model_selection._utils import (
@@ -30,9 +31,19 @@ from ..model_selection._utils import (
     initialize_lags_grid,
     _initialize_levels_model_selection_multiseries,
     _calculate_metrics_one_step_ahead,
-    _predict_and_calculate_metrics_one_step_ahead_multiseries
+    _predict_and_calculate_metrics_one_step_ahead_multiseries,
+    _make_lags_hashable
 )
-from ..utils import initialize_lags, date_to_index_position, set_skforecast_warnings
+from ..utils import (
+    initialize_lags, 
+    date_to_index_position, 
+    check_preprocess_series,
+    check_preprocess_exog_multiseries,
+    manage_warnings,
+    deepcopy_forecaster,
+    _get_estimator_categorical_set_params,
+    _restore_estimator_categorical_set_params
+)
 
 
 def grid_search_forecaster(
@@ -51,6 +62,7 @@ def grid_search_forecaster(
     n_jobs: int | str = 'auto',
     verbose: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None
 ) -> pd.DataFrame:
     """
@@ -66,7 +78,6 @@ def grid_search_forecaster(
     cv : TimeSeriesFold, OneStepAheadFold
         TimeSeriesFold or OneStepAheadFold object with the information needed to split
         the data into folds.
-        **New in version 0.14.0**
     param_grid : dict
         Dictionary with parameters names (`str`) as keys and lists of parameter
         settings to try as values.
@@ -92,16 +103,19 @@ def grid_search_forecaster(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings : bool, default False
+        If `True`, skforecast warnings will be suppressed during the hyperparameter 
+        search. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -119,18 +133,19 @@ def grid_search_forecaster(
     param_grid = list(ParameterGrid(param_grid))
 
     results = _evaluate_grid_hyperparameters(
-                  forecaster    = forecaster,
-                  y             = y,
-                  cv            = cv,
-                  param_grid    = param_grid,
-                  metric        = metric,
-                  exog          = exog,
-                  lags_grid     = lags_grid,
-                  return_best   = return_best,
-                  n_jobs        = n_jobs,
-                  verbose       = verbose,
-                  show_progress = show_progress,
-                  output_file   = output_file
+                  forecaster        = forecaster,
+                  y                 = y,
+                  cv                = cv,
+                  param_grid        = param_grid,
+                  metric            = metric,
+                  exog              = exog,
+                  lags_grid         = lags_grid,
+                  return_best       = return_best,
+                  n_jobs            = n_jobs,
+                  verbose           = verbose,
+                  show_progress     = show_progress,
+                  suppress_warnings = suppress_warnings,
+                  output_file       = output_file
               )
 
     return results
@@ -154,6 +169,7 @@ def random_search_forecaster(
     n_jobs: int | str = 'auto',
     verbose: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None
 ) -> pd.DataFrame:
     """
@@ -169,7 +185,6 @@ def random_search_forecaster(
     cv : TimeSeriesFold, OneStepAheadFold
         TimeSeriesFold or OneStepAheadFold object with the information needed to split
         the data into folds.
-        **New in version 0.14.0**
     param_distributions : dict
         Dictionary with parameters names (`str`) as keys and 
         distributions or lists of parameters to try.
@@ -200,16 +215,19 @@ def random_search_forecaster(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings : bool, default False
+        If `True`, skforecast warnings will be suppressed during the hyperparameter 
+        search. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -227,23 +245,25 @@ def random_search_forecaster(
     param_grid = list(ParameterSampler(param_distributions, n_iter=n_iter, random_state=random_state))
 
     results = _evaluate_grid_hyperparameters(
-                  forecaster    = forecaster,
-                  y             = y,
-                  cv            = cv,
-                  param_grid    = param_grid,
-                  metric        = metric,
-                  exog          = exog,
-                  lags_grid     = lags_grid,
-                  return_best   = return_best,
-                  n_jobs        = n_jobs,
-                  verbose       = verbose,
-                  show_progress = show_progress,
-                  output_file   = output_file
+                  forecaster        = forecaster,
+                  y                 = y,
+                  cv                = cv,
+                  param_grid        = param_grid,
+                  metric            = metric,
+                  exog              = exog,
+                  lags_grid         = lags_grid,
+                  return_best       = return_best,
+                  n_jobs            = n_jobs,
+                  verbose           = verbose,
+                  show_progress     = show_progress,
+                  suppress_warnings = suppress_warnings,
+                  output_file       = output_file
               )
 
     return results
 
 
+@manage_warnings
 def _evaluate_grid_hyperparameters(
     forecaster: object,
     y: pd.Series,
@@ -260,6 +280,7 @@ def _evaluate_grid_hyperparameters(
     n_jobs: int | str = 'auto',
     verbose: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None
 ) -> pd.DataFrame:
     """
@@ -274,7 +295,6 @@ def _evaluate_grid_hyperparameters(
     cv : TimeSeriesFold, OneStepAheadFold
         TimeSeriesFold or OneStepAheadFold object with the information needed to split
         the data into folds.
-        **New in version 0.14.0**
     param_grid : dict
         Dictionary with parameters names (`str`) as keys and lists of parameter
         settings to try as values.
@@ -300,16 +320,19 @@ def _evaluate_grid_hyperparameters(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings : bool, default False
+        If `True`, skforecast warnings will be suppressed during the hyperparameter 
+        search. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -324,6 +347,14 @@ def _evaluate_grid_hyperparameters(
 
     """
 
+    if return_best and exog is not None and (len(exog) != len(y)):
+        raise ValueError(
+            f"`exog` must have same number of samples as `y`. "
+            f"length `exog`: ({len(exog)}), length `y`: ({len(y)})"
+        )
+
+    forecaster_search = deepcopy_forecaster(forecaster)
+    is_regression = forecaster_search.__skforecast_tags__['forecaster_task'] == 'regression'
     cv_name = type(cv).__name__
     if cv_name not in ['TimeSeriesFold', 'OneStepAheadFold']:
         raise TypeError(
@@ -334,35 +365,22 @@ def _evaluate_grid_hyperparameters(
     if cv_name == 'OneStepAheadFold':
 
         check_one_step_ahead_input(
-            forecaster        = forecaster,
+            forecaster        = forecaster_search,
             cv                = cv,
             metric            = metric,
             y                 = y,
             exog              = exog,
             show_progress     = show_progress,
-            suppress_warnings = False
+            suppress_warnings = suppress_warnings
         )
 
-        cv = deepcopy(cv)
         initial_train_size = date_to_index_position(
                                  index        = cv._extract_index(y), 
                                  date_input   = cv.initial_train_size, 
                                  method       = 'validation',
                                  date_literal = 'initial_train_size'
                              )
-        cv.set_params({
-            'initial_train_size': initial_train_size,
-            'window_size': forecaster.window_size,
-            'differentiation': forecaster.differentiation_max,
-            'verbose': verbose
-        })
 
-    if return_best and exog is not None and (len(exog) != len(y)):
-        raise ValueError(
-            f"`exog` must have same number of samples as `y`. "
-            f"length `exog`: ({len(exog)}), length `y`: ({len(y)})"
-        )
-   
     if not isinstance(metric, list):
         metric = [metric] 
     metric = [
@@ -381,13 +399,12 @@ def _evaluate_grid_hyperparameters(
             "When `metric` is a `list`, each metric name must be unique."
         )
 
-    lags_grid, lags_label = initialize_lags_grid(forecaster, lags_grid)
+    lags_grid, lags_label = initialize_lags_grid(forecaster_search, lags_grid)
     if verbose:
         print(f"Number of models compared: {len(param_grid) * len(lags_grid)}.")
 
     if show_progress:
         lags_grid_tqdm = tqdm(lags_grid.items(), desc='lags grid', position=0)  # ncols=90
-        param_grid = tqdm(param_grid, desc='params grid', position=1, leave=False)
     else:
         lags_grid_tqdm = lags_grid.items()
     
@@ -399,8 +416,8 @@ def _evaluate_grid_hyperparameters(
     params_list = []
     for lags_k, lags_v in lags_grid_tqdm:
         
-        forecaster.set_lags(lags_v)
-        lags_v = forecaster.lags.copy()
+        forecaster_search.set_lags(lags_v)
+        lags_v = forecaster_search.lags.copy()
         if lags_label == 'values':
             lags_k = lags_v
 
@@ -410,40 +427,52 @@ def _evaluate_grid_hyperparameters(
                 X_train,
                 y_train,
                 X_test,
-                y_test
-            ) = forecaster._train_test_split_one_step_ahead(
-                y=y, initial_train_size=cv.initial_train_size, exog=exog
+                y_test,
+                sample_weight,
+                fit_kwargs
+            ) = forecaster_search._train_test_split_one_step_ahead(
+                y=y, initial_train_size=initial_train_size, exog=exog
             )
 
-        for params in param_grid:
+        if show_progress:
+            param_grid_tqdm = tqdm(param_grid, desc='params grid', position=1, leave=False)
+        else:
+            param_grid_tqdm = param_grid
 
-            forecaster.set_params(params)
+        for params in param_grid_tqdm:
+            try:
+                forecaster_search.set_params(params)
+                if cv_name == 'TimeSeriesFold':
 
-            if cv_name == 'TimeSeriesFold':
+                    metric_values = backtesting_forecaster(
+                                        forecaster        = forecaster_search,
+                                        y                 = y,
+                                        cv                = cv,
+                                        metric            = metric,
+                                        exog              = exog,
+                                        interval          = None,
+                                        n_jobs            = n_jobs,
+                                        verbose           = verbose,
+                                        show_progress     = False,
+                                        suppress_warnings = suppress_warnings
+                                    )[0]
+                    metric_values = metric_values.iloc[0, :].to_list()
 
-                metric_values = backtesting_forecaster(
-                                    forecaster    = forecaster,
-                                    y             = y,
-                                    cv            = cv,
-                                    metric        = metric,
-                                    exog          = exog,
-                                    interval      = None,
-                                    n_jobs        = n_jobs,
-                                    verbose       = verbose,
-                                    show_progress = False
-                                )[0]
-                metric_values = metric_values.iloc[0, :].to_list()
+                else:
 
-            else:
-
-                metric_values = _calculate_metrics_one_step_ahead(
-                                    forecaster = forecaster,
-                                    metrics    = metric,
-                                    X_train    = X_train,
-                                    y_train    = y_train,
-                                    X_test     = X_test,
-                                    y_test     = y_test
-                                )
+                    metric_values = _calculate_metrics_one_step_ahead(
+                                        forecaster    = forecaster_search,
+                                        metrics       = metric,
+                                        X_train       = X_train,
+                                        y_train       = y_train,
+                                        X_test        = X_test,
+                                        y_test        = y_test,
+                                        sample_weight = sample_weight,
+                                        fit_kwargs    = fit_kwargs
+                                    )
+            except Exception as e:
+                warnings.warn(f"Parameters skipped: {params}. {e}", RuntimeWarning)
+                continue
 
             warnings.filterwarnings(
                 'ignore',
@@ -459,8 +488,9 @@ def _evaluate_grid_hyperparameters(
                 metric_dict[m_name].append(m_value)
         
             if output_file is not None:
-                header = ['lags', 'lags_label', 'params', 
-                          *metric_dict.keys(), *params.keys()]
+                header = [
+                    'lags', 'lags_label', 'params', *metric_dict.keys(), *params.keys()
+                ]
                 row = [lags_v, lags_k, params, 
                        *metric_values, *params.values()]
                 if not os.path.isfile(output_file):
@@ -480,34 +510,49 @@ def _evaluate_grid_hyperparameters(
     
     results = (
         results
-        .sort_values(by=list(metric_dict.keys())[0], ascending=True)
+        .sort_values(by=list(metric_dict.keys())[0], ascending=True if is_regression else False)
         .reset_index(drop=True)
     )
     results = pd.concat([results, results['params'].apply(pd.Series)], axis=1)
-    
+
+    if results.empty:
+        warnings.warn(
+            "No valid parameter combinations found. All combinations raised exceptions.",
+            RuntimeWarning
+        )
+        return results
+
     if return_best:
         
         best_lags = results.loc[0, 'lags']
         best_params = results.loc[0, 'params']
         best_metric = results.loc[0, list(metric_dict.keys())[0]]
         
+        # NOTE: Here we use the actual forecaster passed by the user
         forecaster.set_lags(best_lags)
         forecaster.set_params(best_params)
 
-        forecaster.fit(y=y, exog=exog, store_in_sample_residuals=True)
-        
-        print(
-            f"`Forecaster` refitted using the best-found lags and parameters, "
-            f"and the whole data set: \n"
-            f"  Lags: {best_lags} \n"
-            f"  Parameters: {best_params}\n"
-            f"  {'Backtesting' if cv_name == 'TimeSeriesFold' else 'One-step-ahead'} "
-            f"metric: {best_metric}"
+        forecaster.fit(
+            y                         = y,
+            exog                      = exog,
+            store_in_sample_residuals = True,
+            suppress_warnings         = suppress_warnings
         )
-            
+        
+        if verbose:
+            print(
+                f"`Forecaster` refitted using the best-found lags and parameters, "
+                f"and the whole data set: \n"
+                f"  Lags: {best_lags} \n"
+                f"  Parameters: {best_params}\n"
+                f"  {'Backtesting' if cv_name == 'TimeSeriesFold' else 'One-step-ahead'} "
+                f"metric: {best_metric}"
+            )
+
     return results
 
 
+@manage_warnings
 def bayesian_search_forecaster(
     forecaster: object,
     y: pd.Series,
@@ -515,18 +560,19 @@ def bayesian_search_forecaster(
     search_space: Callable,
     metric: str | Callable | list[str | Callable],
     exog: pd.Series | pd.DataFrame | None = None,
-    n_trials: int = 10,
+    n_trials: int = 20,
     random_state: int = 123,
     return_best: bool = True,
     n_jobs: int | str = 'auto',
     verbose: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None,
-    kwargs_create_study: dict = {},
-    kwargs_study_optimize: dict = {}
+    kwargs_create_study: dict | None = None,
+    kwargs_study_optimize: dict | None = None
 ) -> tuple[pd.DataFrame, object]:
     """
-    Bayesian search for hyperparameters of a Forecaster object.
+    Bayesian search for hyperparameters of a Forecaster object using optuna library.
     
     Parameters
     ----------
@@ -537,7 +583,6 @@ def bayesian_search_forecaster(
     cv : TimeSeriesFold, OneStepAheadFold
         TimeSeriesFold or OneStepAheadFold object with the information needed to split
         the data into folds.
-        **New in version 0.14.0**
     search_space : Callable (optuna)
         Function with argument `trial` which returns a dictionary with parameters names 
         (`str`) as keys and Trial object from optuna (trial.suggest_float, 
@@ -555,8 +600,11 @@ def bayesian_search_forecaster(
         Exogenous variable/s included as predictor/s. Must have the same
         number of observations as `y` and should be aligned so that y[i] is
         regressed on exog[i].
-    n_trials : int, default 10
-        Number of parameter settings that are sampled in each lag configuration.
+    n_trials : int, default 20
+        Number of parameter settings that are sampled in each lag configuration. 
+        The first 10 trials are random (controlled by optuna's `n_startup_trials`); 
+        the TPE sampler only guides the search from trial 11 onward. For meaningful 
+        Bayesian optimization, `n_trials` should be significantly larger than 10.
     random_state : int, default 123
         Sets a seed to the sampling for reproducible output. When a new sampler 
         is passed in `kwargs_create_study`, the seed must be set within the 
@@ -566,21 +614,26 @@ def bayesian_search_forecaster(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings : bool, default False
+        If `True`, skforecast warnings will be suppressed during the hyperparameter 
+        search. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
-        Specifies the filename or full path where the results should be saved. 
-        The results will be saved in a tab-separated values (TSV) format. If 
-        `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
-    kwargs_create_study : dict, default {}
+        Specifies the filename or full path where the optuna logging output
+        should be saved. If `None`, logging output will not be redirected to
+        a file.
+    kwargs_create_study : dict, default None
         Additional keyword arguments (key, value mappings) to pass to optuna.create_study().
-        If default, the direction is set to 'minimize' and a TPESampler(seed=123) 
+        If default, the direction is set to 'minimize' for regression tasks or
+        'maximize' for classification tasks, and a 
+        `TPESampler(multivariate=True, group=True, seed=random_state)` 
         sampler is used during optimization.
-    kwargs_study_optimize : dict, default {}
+    kwargs_study_optimize : dict, default None
         Additional keyword arguments (key, value mappings) to pass to study.optimize().
 
     Returns
@@ -588,12 +641,15 @@ def bayesian_search_forecaster(
     results : pandas DataFrame
         Results for each combination of parameters.
 
+        - column trial_number: optuna trial number for each iteration. Use
+          `study.trials[trial_number]` to access the full optuna trial object.
         - column lags: lags configuration for each iteration.
         - column params: parameters configuration for each iteration.
         - column metric: metric value estimated for each iteration.
         - additional n columns with param = value.
-    best_trial : optuna object
-        The best optimization result returned as a FrozenTrial optuna object.
+    study : optuna Study
+        The optuna study object containing all optimization trials. Access the
+        best trial via `study.best_trial`.
     
     """
 
@@ -602,118 +658,10 @@ def bayesian_search_forecaster(
             f"`exog` must have same number of samples as `y`. "
             f"length `exog`: ({len(exog)}), length `y`: ({len(y)})"
         )
-            
-    results, best_trial = _bayesian_search_optuna(
-                              forecaster            = forecaster,
-                              y                     = y,
-                              cv                    = cv,
-                              exog                  = exog,
-                              search_space          = search_space,
-                              metric                = metric,
-                              n_trials              = n_trials,
-                              random_state          = random_state,
-                              return_best           = return_best,
-                              n_jobs                = n_jobs,
-                              verbose               = verbose,
-                              show_progress         = show_progress,
-                              output_file           = output_file,
-                              kwargs_create_study   = kwargs_create_study,
-                              kwargs_study_optimize = kwargs_study_optimize
-                          )
 
-    return results, best_trial
-
-
-def _bayesian_search_optuna(
-    forecaster: object,
-    y: pd.Series,
-    cv: TimeSeriesFold | OneStepAheadFold,
-    search_space: Callable,
-    metric: str | Callable | list[str | Callable],
-    exog: pd.Series | pd.DataFrame | None = None,
-    n_trials: int = 10,
-    random_state: int = 123,
-    return_best: bool = True,
-    n_jobs: int | str = 'auto',
-    verbose: bool = False,
-    show_progress: bool = True,
-    output_file: str | None = None,
-    kwargs_create_study: dict = {},
-    kwargs_study_optimize: dict = {}
-) -> tuple[pd.DataFrame, object]:
-    """
-    Bayesian search for hyperparameters of a Forecaster object using optuna library.
-    
-    Parameters
-    ----------
-    forecaster : ForecasterRecursive, ForecasterDirect
-        Forecaster model.
-    y : pandas Series
-        Training time series. 
-    cv : TimeSeriesFold, OneStepAheadFold
-        TimeSeriesFold or OneStepAheadFold object with the information needed to split
-        the data into folds.
-        **New in version 0.
-    search_space : Callable
-        Function with argument `trial` which returns a dictionary with parameters names 
-        (`str`) as keys and Trial object from optuna (trial.suggest_float, 
-        trial.suggest_int, trial.suggest_categorical) as values.
-    metric : str, Callable, list
-        Metric used to quantify the goodness of fit of the model.
-        
-        - If `string`: {'mean_squared_error', 'mean_absolute_error',
-        'mean_absolute_percentage_error', 'mean_squared_log_error',
-        'mean_absolute_scaled_error', 'root_mean_squared_scaled_error'}
-        - If `Callable`: Function with arguments `y_true`, `y_pred` and `y_train`
-        (Optional) that returns a float.
-        - If `list`: List containing multiple strings and/or Callables.
-    exog : pandas Series, pandas DataFrame, default None
-        Exogenous variable/s included as predictor/s. Must have the same
-        number of observations as `y` and should be aligned so that y[i] is
-        regressed on exog[i].
-    n_trials : int, default 10
-        Number of parameter settings that are sampled in each lag configuration.
-    random_state : int, default 123
-        Sets a seed to the sampling for reproducible output. When a new sampler 
-        is passed in `kwargs_create_study`, the seed must be set within the 
-        sampler. For example `{'sampler': TPESampler(seed=145)}`.
-    return_best : bool, default True
-        Refit the `forecaster` using the best found parameters on the whole data.
-    n_jobs : int, 'auto', default 'auto'
-        The number of jobs to run in parallel. If `-1`, then the number of jobs is 
-        set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
-    verbose : bool, default False
-        Print number of folds used for cv or backtesting.
-    show_progress : bool, default True
-        Whether to show a progress bar.
-    output_file : str, default None
-        Specifies the filename or full path where the results should be saved. 
-        The results will be saved in a tab-separated values (TSV) format. If 
-        `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
-    kwargs_create_study : dict, default {}
-        Additional keyword arguments (key, value mappings) to pass to optuna.create_study().
-        If default, the direction is set to 'minimize' and a TPESampler(seed=123) 
-        sampler is used during optimization.
-    kwargs_study_optimize : dict, default {}
-        Additional keyword arguments (key, value mappings) to pass to study.optimize().
-
-    Returns
-    -------
-    results : pandas DataFrame
-        Results for each combination of parameters.
-
-        - column lags: lags configuration for each iteration.
-        - column params: parameters configuration for each iteration.
-        - column metric: metric value estimated for each iteration.
-        - additional n columns with param = value.
-    best_trial : optuna object
-        The best optimization result returned as an optuna FrozenTrial object.
-
-    """
-    
-    forecaster_name = type(forecaster).__name__
+    forecaster_search = deepcopy_forecaster(forecaster)
+    forecaster_name = type(forecaster_search).__name__
+    is_regression = forecaster_search.__skforecast_tags__['forecaster_task'] == 'regression'
     cv_name = type(cv).__name__
 
     if cv_name not in ['TimeSeriesFold', 'OneStepAheadFold']:
@@ -725,28 +673,21 @@ def _bayesian_search_optuna(
     if cv_name == 'OneStepAheadFold':
 
         check_one_step_ahead_input(
-            forecaster        = forecaster,
+            forecaster        = forecaster_search,
             cv                = cv,
             metric            = metric,
             y                 = y,
             exog              = exog,
             show_progress     = show_progress,
-            suppress_warnings = False
+            suppress_warnings = suppress_warnings
         )
 
-        cv = deepcopy(cv)
         initial_train_size = date_to_index_position(
                                  index        = cv._extract_index(y), 
                                  date_input   = cv.initial_train_size, 
                                  method       = 'validation',
                                  date_literal = 'initial_train_size'
                              )
-        cv.set_params({
-            'initial_train_size': initial_train_size,
-            'window_size': forecaster.window_size,
-            'differentiation': forecaster.differentiation_max,
-            'verbose': verbose
-        })
     
     if not isinstance(metric, list):
         metric = [metric]
@@ -771,84 +712,147 @@ def _bayesian_search_optuna(
 
         def _objective(
             trial,
-            search_space = search_space,
-            forecaster   = forecaster,
-            y            = y,
-            cv           = cv,
-            exog         = exog,
-            metric       = metric,
-            n_jobs       = n_jobs,
-            verbose      = verbose,
+            search_space      = search_space,
+            forecaster_search = forecaster_search,
+            y                 = y,
+            cv                = cv,
+            exog              = exog,
+            metric            = metric,
+            n_jobs            = n_jobs,
+            verbose           = verbose,
+            suppress_warnings = suppress_warnings,
         ) -> float:
             
             sample = search_space(trial)
+            if sample.keys() != trial.params.keys():
+                raise ValueError(
+                    f"`search_space` dict keys must match the names passed to "
+                    f"`trial.suggest_*()`.\n"
+                    f"  Dict keys    : {list(sample.keys())}\n"
+                    f"  Suggest names: {list(trial.params.keys())}"
+                )
             sample_params = {k: v for k, v in sample.items() if k != 'lags'}
-            forecaster.set_params(sample_params)
+            forecaster_search.set_params(sample_params)
             if "lags" in sample:
-                forecaster.set_lags(sample['lags'])
+                forecaster_search.set_lags(sample['lags'])
             
             metrics, _ = backtesting_forecaster(
-                             forecaster    = forecaster,
-                             y             = y,
-                             cv            = cv,
-                             exog          = exog,
-                             metric        = metric,
-                             n_jobs        = n_jobs,
-                             verbose       = verbose,
-                             show_progress = False
+                             forecaster        = forecaster_search,
+                             y                 = y,
+                             cv                = cv,
+                             exog              = exog,
+                             metric            = metric,
+                             n_jobs            = n_jobs,
+                             verbose           = verbose,
+                             show_progress     = False,
+                             suppress_warnings = suppress_warnings
                          )
             metrics = metrics.iloc[0, :].to_list()
             
-            # Store metrics in the variable `metric_values` defined outside _objective.
-            nonlocal metric_values
-            metric_values.append(metrics)
+            # Store all metrics in the trial using optuna's user_attrs mechanism.
+            for m_name, m_val in zip(metric_dict, metrics):
+                trial.set_user_attr(m_name, float(m_val))
 
             return metrics[0]
         
     else:
 
+        _SENTINEL = object()
+        _MAX_CACHE_SIZE = 10
+        _cached_split = {}
+
         def _objective(
             trial,
-            search_space = search_space,
-            forecaster   = forecaster,
-            y            = y,
-            cv           = cv,
-            exog         = exog,
-            metric       = metric
+            search_space      = search_space,
+            forecaster_search = forecaster_search,
+            y                 = y,
+            cv                = cv,
+            exog              = exog,
+            metric            = metric
         ) -> float:
             
             sample = search_space(trial)
+            if sample.keys() != trial.params.keys():
+                raise ValueError(
+                    f"`search_space` dict keys must match the names passed to "
+                    f"`trial.suggest_*()`.\n"
+                    f"  Dict keys    : {list(sample.keys())}\n"
+                    f"  Suggest names: {list(trial.params.keys())}"
+                )
             sample_params = {k: v for k, v in sample.items() if k != 'lags'}
-            forecaster.set_params(sample_params)
-            if "lags" in sample:
-                forecaster.set_lags(sample['lags'])
+            forecaster_search.set_params(sample_params)
 
-            (
-                X_train,
-                y_train,
-                X_test,
-                y_test
-            ) = forecaster._train_test_split_one_step_ahead(
-                y=y, initial_train_size=cv.initial_train_size, exog=exog
-            )
+            current_lags = sample.get('lags', _SENTINEL)
+            if current_lags is not _SENTINEL:
+                forecaster_search.set_lags(current_lags)
+
+            lags_key = _make_lags_hashable(current_lags, sentinel=_SENTINEL)
+            if lags_key not in _cached_split:
+
+                if len(_cached_split) >= _MAX_CACHE_SIZE:
+                    _cached_split.pop(next(iter(_cached_split)))
+
+                (
+                    X_train,
+                    y_train,
+                    X_test,
+                    y_test,
+                    sample_weight,
+                    fit_kwargs
+                ) = forecaster_search._train_test_split_one_step_ahead(
+                    y=y, initial_train_size=initial_train_size, exog=exog
+                )
+                
+                _cached_split[lags_key] = (
+                    X_train, y_train, X_test, y_test, sample_weight, fit_kwargs,
+                    _get_estimator_categorical_set_params(forecaster_search)
+                )
+
+            else:
+
+                (
+                    X_train, y_train, X_test, y_test, sample_weight, fit_kwargs,
+                    _estimator_cat_params
+                ) = _cached_split[lags_key]
+                _restore_estimator_categorical_set_params(
+                    forecaster_search, _estimator_cat_params
+                )
 
             metrics = _calculate_metrics_one_step_ahead(
-                          forecaster = forecaster,
-                          metrics    = metric,
-                          X_train    = X_train,
-                          y_train    = y_train,
-                          X_test     = X_test,
-                          y_test     = y_test
+                          forecaster    = forecaster_search,
+                          metrics       = metric,
+                          X_train       = X_train,
+                          y_train       = y_train,
+                          X_test        = X_test,
+                          y_test        = y_test,
+                          sample_weight = sample_weight,
+                          fit_kwargs    = fit_kwargs
                       )
 
-            # Store all metrics in the variable `metric_values` defined outside _objective.
-            nonlocal metric_values
-            metric_values.append(metrics)
+            # Store all metrics in the trial using optuna's user_attrs mechanism.
+            for m_name, m_val in zip(metric_dict, metrics):
+                trial.set_user_attr(m_name, float(m_val))
 
             return metrics[0]
 
+    kwargs_create_study = kwargs_create_study.copy() if kwargs_create_study is not None else {}
+    if 'direction' not in kwargs_create_study.keys():
+        kwargs_create_study['direction'] = 'minimize' if is_regression else 'maximize'
+    if 'sampler' not in kwargs_create_study:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                'ignore',
+                message='.*multivariate.*|.*group.*'
+            )
+            kwargs_create_study['sampler'] = TPESampler(
+                multivariate=True, group=True, seed=random_state
+            )
+
+    kwargs_study_optimize = kwargs_study_optimize.copy() if kwargs_study_optimize is not None else {}
     if show_progress:
         kwargs_study_optimize['show_progress_bar'] = True
+    else:
+        kwargs_study_optimize.setdefault('show_progress_bar', False)
 
     if output_file is not None:
         # Redirect optuna logging to file
@@ -864,56 +868,38 @@ def _bayesian_search_optuna(
         logging.getLogger("optuna").setLevel(logging.WARNING)
         optuna.logging.disable_default_handler()
 
-    # `metric_values` will be modified inside _objective function. 
-    # It is a trick to extract multiple values from _objective since
-    # only the optimized value can be returned.
-    metric_values = []
-
-    warnings.filterwarnings(
-        "ignore",
-        category = UserWarning,
-        message  = "Choices for a categorical distribution should be*"
-    )
-
     study = optuna.create_study(**kwargs_create_study)
 
-    if 'sampler' not in kwargs_create_study.keys():
-        study.sampler = TPESampler(seed=random_state)
-
-    study.optimize(_objective, n_trials=n_trials, **kwargs_study_optimize)
-    best_trial = study.best_trial
-
-    if output_file is not None:
-        handler.close()
-
-    if search_space(best_trial).keys() != best_trial.params.keys():
-        raise ValueError(
-            f"Some of the key values do not match the search_space key names.\n"
-            f"  Search Space keys  : {list(search_space(best_trial).keys())}\n"
-            f"  Trial objects keys : {list(best_trial.params.keys())}."
-        )
-    warnings.filterwarnings('default')
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category = UserWarning,
+                message  = "Choices for a categorical distribution should be*"
+            )
+            study.optimize(_objective, n_trials=n_trials, **kwargs_study_optimize)
+    finally:
+        if output_file is not None:
+            handler.close()
+            logger.removeHandler(handler)
     
     lags_list = []
     params_list = []
-    for i, trial in enumerate(study.get_trials()):
-        regressor_params = {k: v for k, v in trial.params.items() if k != 'lags'}
+    trial_number_list = []
+    for trial in study.get_trials(states=[TrialState.COMPLETE]):
+        estimator_params = {k: v for k, v in trial.params.items() if k != 'lags'}
         lags = trial.params.get(
-                   'lags',
-                   forecaster.lags if hasattr(forecaster, 'lags') else None
-               )
-        params_list.append(regressor_params)
-        lags_list.append(lags)
-        for m, m_values in zip(metric, metric_values[i]):
-            m_name = m if isinstance(m, str) else m.__name__
-            metric_dict[m_name].append(m_values)
-    
-    lags_list = [
-        initialize_lags(forecaster_name=forecaster_name, lags=lag)[0]
-        for lag in lags_list
-    ]
+            'lags',
+            forecaster_search.lags if hasattr(forecaster_search, 'lags') else None
+        )
+        params_list.append(estimator_params)
+        lags_list.append(initialize_lags(forecaster_name=forecaster_name, lags=lags)[0])
+        trial_number_list.append(trial.number)
+        for m_name in metric_dict:
+            metric_dict[m_name].append(trial.user_attrs[m_name])
 
     results = pd.DataFrame({
+                  'trial_number': trial_number_list,
                   'lags': lags_list,
                   'params': params_list,
                   **metric_dict
@@ -921,7 +907,7 @@ def _bayesian_search_optuna(
     
     results = (
         results
-        .sort_values(by=list(metric_dict.keys())[0], ascending=True)
+        .sort_values(by=list(metric_dict.keys())[0], ascending=True if is_regression else False)
         .reset_index(drop=True)
     )
     results = pd.concat([results, results['params'].apply(pd.Series)], axis=1)
@@ -932,21 +918,28 @@ def _bayesian_search_optuna(
         best_params = results.loc[0, 'params']
         best_metric = results.loc[0, list(metric_dict.keys())[0]]
         
+        # NOTE: Here we use the actual forecaster passed by the user
         forecaster.set_lags(best_lags)
         forecaster.set_params(best_params)
 
-        forecaster.fit(y=y, exog=exog, store_in_sample_residuals=True)
-        
-        print(
-            f"`Forecaster` refitted using the best-found lags and parameters, "
-            f"and the whole data set: \n"
-            f"  Lags: {best_lags} \n"
-            f"  Parameters: {best_params}\n"
-            f"  {'Backtesting' if cv_name == 'TimeSeriesFold' else 'One-step-ahead'} "
-            f"metric: {best_metric}"
+        forecaster.fit(
+            y                         = y,
+            exog                      = exog,
+            store_in_sample_residuals = True,
+            suppress_warnings         = suppress_warnings
         )
-            
-    return results, best_trial
+        
+        if verbose:
+            print(
+                f"`Forecaster` refitted using the best-found lags and parameters, "
+                f"and the whole data set: \n"
+                f"  Lags: {best_lags} \n"
+                f"  Parameters: {best_params}\n"
+                f"  {'Backtesting' if cv_name == 'TimeSeriesFold' else 'One-step-ahead'} "
+                f"metric: {best_metric}"
+            )
+
+    return results, study
 
 
 def grid_search_forecaster_multiseries(
@@ -955,7 +948,7 @@ def grid_search_forecaster_multiseries(
     cv: TimeSeriesFold | OneStepAheadFold,
     param_grid: dict,
     metric: str | Callable | list[str | Callable],
-    aggregate_metric: str | list[str] = ['weighted_average', 'average', 'pooling'],
+    aggregate_metric: str | list[str] | None = None,
     levels: str | list[str] | None = None,
     exog: pd.Series | pd.DataFrame | dict[str, pd.Series | pd.DataFrame] | None = None,
     lags_grid: (
@@ -983,7 +976,6 @@ def grid_search_forecaster_multiseries(
     cv : TimeSeriesFold, OneStepAheadFold
         TimeSeriesFold or OneStepAheadFold object with the information needed to split
         the data into folds.
-        **New in version 0.14.0**
     param_grid : dict
         Dictionary with parameters names (`str`) as keys and lists of parameter
         settings to try as values.
@@ -996,10 +988,11 @@ def grid_search_forecaster_multiseries(
         - If `Callable`: Function with arguments `y_true`, `y_pred` and `y_train`
         (Optional) that returns a float.
         - If `list`: List containing multiple strings and/or Callables.
-    aggregate_metric : str, list, default `['weighted_average', 'average', 'pooling']`
+    aggregate_metric : str, list, default None
         Aggregation method/s used to combine the metric/s of all levels (series)
         when multiple levels are predicted. If list, the first aggregation method
-        is used to select the best parameters.
+        is used to select the best parameters. If `None`,
+        `['weighted_average', 'average', 'pooling']` is used.
 
         - 'average': the average (arithmetic mean) of all levels.
         - 'weighted_average': the average of the metrics weighted by the number of
@@ -1020,7 +1013,7 @@ def grid_search_forecaster_multiseries(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
@@ -1033,7 +1026,6 @@ def grid_search_forecaster_multiseries(
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -1079,7 +1071,7 @@ def random_search_forecaster_multiseries(
     cv: TimeSeriesFold | OneStepAheadFold,
     param_distributions: dict,
     metric: str | Callable | list[str | Callable],
-    aggregate_metric: str | list[str] = ['weighted_average', 'average', 'pooling'],
+    aggregate_metric: str | list[str] | None = None,
     levels: str | list[str] | None = None,
     exog: pd.Series | pd.DataFrame | dict[str, pd.Series | pd.DataFrame] | None = None,
     lags_grid: (
@@ -1121,10 +1113,11 @@ def random_search_forecaster_multiseries(
         - If `Callable`: Function with arguments `y_true`, `y_pred` and `y_train`
         (Optional) that returns a float.
         - If `list`: List containing multiple strings and/or Callables.
-    aggregate_metric : str, list, default `['weighted_average', 'average', 'pooling']`
+    aggregate_metric : str, list, default None
         Aggregation method/s used to combine the metric/s of all levels (series)
         when multiple levels are predicted. If list, the first aggregation method
-        is used to select the best parameters.
+        is used to select the best parameters. If `None`,
+        `['weighted_average', 'average', 'pooling']` is used.
 
         - 'average': the average (arithmetic mean) of all levels.
         - 'weighted_average': the average of the metrics weighted by the number of
@@ -1150,7 +1143,7 @@ def random_search_forecaster_multiseries(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
@@ -1163,7 +1156,6 @@ def random_search_forecaster_multiseries(
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -1180,8 +1172,9 @@ def random_search_forecaster_multiseries(
     
     """
   
-    param_grid = list(ParameterSampler(param_distributions, n_iter=n_iter, 
-                                       random_state=random_state))
+    param_grid = list(
+        ParameterSampler(param_distributions, n_iter=n_iter, random_state=random_state)
+    )
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster        = forecaster,
@@ -1204,13 +1197,14 @@ def random_search_forecaster_multiseries(
     return results
 
 
+@manage_warnings
 def _evaluate_grid_hyperparameters_multiseries(
     forecaster: object,
     series: pd.DataFrame | dict[str, pd.Series | pd.DataFrame],
     cv: TimeSeriesFold | OneStepAheadFold,
     param_grid: dict,
     metric: str | Callable | list[str | Callable],
-    aggregate_metric: str | list[str] = ['weighted_average', 'average', 'pooling'],
+    aggregate_metric: str | list[str] | None = None,
     levels: str | list[str] | None = None,
     exog: pd.Series | pd.DataFrame | dict[str, pd.Series | pd.DataFrame] | None = None,
     lags_grid: (
@@ -1249,10 +1243,11 @@ def _evaluate_grid_hyperparameters_multiseries(
         - If `Callable`: Function with arguments `y_true`, `y_pred` and `y_train`
         (Optional) that returns a float.
         - If `list`: List containing multiple strings and/or Callables.
-    aggregate_metric : str, list, default `['weighted_average', 'average', 'pooling']`
+    aggregate_metric : str, list, default None
         Aggregation method/s used to combine the metric/s of all levels (series)
         when multiple levels are predicted. If list, the first aggregation method
-        is used to select the best parameters.
+        is used to select the best parameters. If `None`,
+        `['weighted_average', 'average', 'pooling']` is used.
 
         - 'average': the average (arithmetic mean) of all levels.
         - 'weighted_average': the average of the metrics weighted by the number of
@@ -1273,7 +1268,7 @@ def _evaluate_grid_hyperparameters_multiseries(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting. 
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`. 
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
@@ -1286,7 +1281,6 @@ def _evaluate_grid_hyperparameters_multiseries(
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -1304,7 +1298,26 @@ def _evaluate_grid_hyperparameters_multiseries(
     
     """
 
-    set_skforecast_warnings(suppress_warnings, action='ignore')
+    forecaster_search = deepcopy_forecaster(forecaster)
+    if type(forecaster_search).__name__ == 'ForecasterRecursiveMultiSeries':
+        series, series_indexes = check_preprocess_series(series)
+        if exog is not None:
+            series_names_in_ = list(series.keys())
+            exog_dict = {serie: None for serie in series_names_in_}
+            exog, _ = check_preprocess_exog_multiseries(
+                          series_names_in_  = series_names_in_,
+                          series_index_type = type(series_indexes[series_names_in_[0]]),
+                          exog              = exog,
+                          exog_dict         = exog_dict
+                      )
+    else:
+        # TODO: This only applies to wide DataFrames. Delete when input is always dict
+        # in all forecasters.
+        if return_best and exog is not None and (len(exog) != len(series)):
+            raise ValueError(
+                f"`exog` must have same number of samples as `series`. "
+                f"length `exog`: ({len(exog)}), length `series`: ({len(series)})"
+            )
 
     cv_name = type(cv).__name__
     if cv_name not in ['TimeSeriesFold', 'OneStepAheadFold']:
@@ -1316,7 +1329,7 @@ def _evaluate_grid_hyperparameters_multiseries(
     if cv_name == 'OneStepAheadFold':
 
         check_one_step_ahead_input(
-            forecaster        = forecaster,
+            forecaster        = forecaster_search,
             cv                = cv,
             metric            = metric,
             series            = series,
@@ -1332,19 +1345,9 @@ def _evaluate_grid_hyperparameters_multiseries(
                                  method       = 'validation',
                                  date_literal = 'initial_train_size'
                              )
-        cv.set_params({
-            'initial_train_size': initial_train_size,
-            'window_size': forecaster.window_size,
-            'differentiation': forecaster.differentiation_max,
-            'verbose': verbose
-        })
-
-    if return_best and exog is not None and (len(exog) != len(series)):
-        raise ValueError(
-            f"`exog` must have same number of samples as `series`. "
-            f"length `exog`: ({len(exog)}), length `series`: ({len(series)})"
-        )
     
+    if aggregate_metric is None:
+        aggregate_metric = ['weighted_average', 'average', 'pooling']
     if isinstance(aggregate_metric, str):
         aggregate_metric = [aggregate_metric]
     allowed_aggregate_metrics = ['average', 'weighted_average', 'pooling']
@@ -1368,7 +1371,7 @@ def _evaluate_grid_hyperparameters_multiseries(
         )
     
     levels = _initialize_levels_model_selection_multiseries(
-                 forecaster = forecaster,
+                 forecaster = forecaster_search,
                  series     = series,
                  levels     = levels
              )
@@ -1381,7 +1384,7 @@ def _evaluate_grid_hyperparameters_multiseries(
             for aggregation in aggregate_metric
         ]
 
-    lags_grid, lags_label = initialize_lags_grid(forecaster, lags_grid)
+    lags_grid, lags_label = initialize_lags_grid(forecaster_search, lags_grid)
     if verbose:
         print(
             f"{len(param_grid) * len(lags_grid)} models compared for {len(levels)} "
@@ -1390,7 +1393,6 @@ def _evaluate_grid_hyperparameters_multiseries(
 
     if show_progress:
         lags_grid_tqdm = tqdm(lags_grid.items(), desc='lags grid', position=0)  # ncols=90
-        param_grid = tqdm(param_grid, desc='params grid', position=1, leave=False)
     else:
         lags_grid_tqdm = lags_grid.items()
     
@@ -1403,8 +1405,8 @@ def _evaluate_grid_hyperparameters_multiseries(
     metrics_list = []
     for lags_k, lags_v in lags_grid_tqdm:
 
-        forecaster.set_lags(lags_v)
-        lags_v = forecaster.lags.copy()
+        forecaster_search.set_lags(lags_v)
+        lags_v = forecaster_search.lags.copy()
         if lags_label == 'values':
             lags_k = lags_v
 
@@ -1416,47 +1418,62 @@ def _evaluate_grid_hyperparameters_multiseries(
                 X_test,
                 y_test,
                 X_train_encoding,
-                X_test_encoding
-            ) = forecaster._train_test_split_one_step_ahead(
-                series=series, exog=exog, initial_train_size=cv.initial_train_size
+                X_test_encoding,
+                sample_weight,
+                fit_kwargs
+            ) = forecaster_search._train_test_split_one_step_ahead(
+                series=series, exog=exog, initial_train_size=initial_train_size
             )
+
+        if show_progress:
+            param_grid_tqdm = tqdm(param_grid, desc='params grid', position=1, leave=False)
+        else:
+            param_grid_tqdm = param_grid
         
-        for params in param_grid:
+        for params in param_grid_tqdm:
+            
+            try:
+                forecaster_search.set_params(params)
+            
+                if cv_name == 'TimeSeriesFold':
 
-            forecaster.set_params(params)
-        
-            if cv_name == 'TimeSeriesFold':
+                    metrics, _ = backtesting_forecaster_multiseries(
+                        forecaster            = forecaster_search,
+                        series                = series,
+                        cv                    = cv,
+                        exog                  = exog,
+                        levels                = levels,
+                        metric                = metric,
+                        add_aggregated_metric = add_aggregated_metric,
+                        interval              = None,
+                        verbose               = verbose,
+                        n_jobs                = n_jobs,
+                        show_progress         = False,
+                        suppress_warnings     = suppress_warnings
+                    )
 
-                metrics, _ = backtesting_forecaster_multiseries(
-                    forecaster            = forecaster,
-                    series                = series,
-                    cv                    = cv,
-                    exog                  = exog,
-                    levels                = levels,
-                    metric                = metric,
-                    add_aggregated_metric = add_aggregated_metric,
-                    interval              = None,
-                    verbose               = verbose,
-                    n_jobs                = n_jobs,
-                    show_progress         = False,
-                    suppress_warnings     = suppress_warnings
-                )
+                else:
 
-            else:
-
-                metrics, _ = _predict_and_calculate_metrics_one_step_ahead_multiseries(
-                    forecaster            = forecaster,
-                    series                = series,
-                    X_train               = X_train,
-                    y_train               = y_train,
-                    X_test                = X_test,
-                    y_test                = y_test,
-                    X_train_encoding      = X_train_encoding,
-                    X_test_encoding       = X_test_encoding,
-                    levels                = levels,
-                    metrics               = metric,
-                    add_aggregated_metric = add_aggregated_metric
-                )
+                    metrics, _ = _predict_and_calculate_metrics_one_step_ahead_multiseries(
+                        forecaster            = forecaster_search,
+                        series                = series,
+                        X_train               = X_train,
+                        y_train               = y_train,
+                        X_test                = X_test,
+                        y_test                = y_test,
+                        X_train_encoding      = X_train_encoding,
+                        X_test_encoding       = X_test_encoding,
+                        levels                = levels,
+                        metrics               = metric,
+                        add_aggregated_metric = add_aggregated_metric,
+                        sample_weight         = sample_weight,
+                        fit_kwargs            = fit_kwargs,
+                        return_predictions    = False
+                    )
+            
+            except Exception as e:
+                warnings.warn(f"Parameters skipped: {params}. {e}", RuntimeWarning)
+                continue
 
             if add_aggregated_metric:
                 metrics = metrics.loc[metrics['levels'].isin(aggregate_metric), :]
@@ -1476,8 +1493,9 @@ def _evaluate_grid_hyperparameters_multiseries(
             metrics_list.append(metrics)
 
             if output_file is not None:
-                header = ['levels', 'lags', 'lags_label', 'params', 
-                          *metric_names, *params.keys()]
+                header = [
+                    'levels', 'lags', 'lags_label', 'params', *metric_names, *params.keys()
+                ]
                 row = [
                     levels,
                     lags_v,
@@ -1494,6 +1512,15 @@ def _evaluate_grid_hyperparameters_multiseries(
                     with open(output_file, 'a', newline='') as f:
                         f.write('\t'.join([str(r) for r in row]) + '\n')
 
+    if not metrics_list:
+        warnings.warn(
+            "No valid parameter combinations found. All combinations raised exceptions.",
+            RuntimeWarning
+        )
+        columns = ['levels', 'lags', 'lags_label', 'params', *metric_names]
+        return pd.DataFrame(columns=columns)
+
+    is_regression = forecaster_search.__skforecast_tags__['forecaster_task'] == 'regression'
     results = pd.concat(metrics_list, axis=0)
     results.insert(0, 'levels', [levels] * len(results))
     results.insert(1, 'lags', lags_list)
@@ -1501,7 +1528,7 @@ def _evaluate_grid_hyperparameters_multiseries(
     results.insert(3, 'params', params_list)
     results = (
         results
-        .sort_values(by=metric_names[0], ascending=True)
+        .sort_values(by=metric_names[0], ascending=True if is_regression else False)
         .reset_index(drop=True)
     )
     results = pd.concat([results, results['params'].apply(pd.Series)], axis=1)
@@ -1512,6 +1539,7 @@ def _evaluate_grid_hyperparameters_multiseries(
         best_params = results.loc[0, 'params']
         best_metric = results.loc[0, metric_names[0]]
         
+        # NOTE: Here we use the actual forecaster passed by the user
         forecaster.set_lags(best_lags)
         forecaster.set_params(best_params)
 
@@ -1527,30 +1555,31 @@ def _evaluate_grid_hyperparameters_multiseries(
         else:
             levels_print = levels
         
-        print(
-            f"`Forecaster` refitted using the best-found lags and parameters, "
-            f"and the whole data set: \n"
-            f"  Lags: {best_lags} \n"
-            f"  Parameters: {best_params}\n"
-            f"  Backtesting metric: {best_metric}\n"
-            f"  Levels: {levels_print}\n"
-        )
+        if verbose:
+            print(
+                f"`Forecaster` refitted using the best-found lags and parameters, "
+                f"and the whole data set: \n"
+                f"  Lags: {best_lags} \n"
+                f"  Parameters: {best_params}\n"
+                f"  {'Backtesting' if cv_name == 'TimeSeriesFold' else 'One-step-ahead'} "
+                f"metric: {best_metric}\n"
+                f"  Levels: {levels_print}"
+            )
 
-    set_skforecast_warnings(suppress_warnings, action='default')
-    
     return results
 
 
+@manage_warnings
 def bayesian_search_forecaster_multiseries(
     forecaster: object,
     series: pd.DataFrame | dict[str, pd.Series | pd.DataFrame],
     cv: TimeSeriesFold | OneStepAheadFold,
     search_space: Callable,
     metric: str | Callable | list[str | Callable],
-    aggregate_metric: str | list[str] = ['weighted_average', 'average', 'pooling'],
+    aggregate_metric: str | list[str] | None = None,
     levels: str | list[str] | None = None,
     exog: pd.Series | pd.DataFrame | dict[str, pd.Series | pd.DataFrame] | None = None,
-    n_trials: int = 10,
+    n_trials: int = 20,
     random_state: int = 123,
     return_best: bool = True,
     n_jobs: int | str = 'auto',
@@ -1558,141 +1587,8 @@ def bayesian_search_forecaster_multiseries(
     show_progress: bool = True,
     suppress_warnings: bool = False,
     output_file: str | None = None,
-    kwargs_create_study: dict = {},
-    kwargs_study_optimize: dict = {}
-) -> tuple[pd.DataFrame, object]:
-    """
-    Bayesian search for hyperparameters of a Forecaster object using optuna library.
-    
-    Parameters
-    ----------
-    forecaster : ForecasterRecursiveMultiSeries, ForecasterDirectMultiVariate
-        Forecaster model.
-    series : pandas DataFrame, dict
-        Training time series.
-    search_space : Callable
-        Function with argument `trial` which returns a dictionary with parameters names 
-        (`str`) as keys and Trial object from optuna (trial.suggest_float, 
-        trial.suggest_int, trial.suggest_categorical) as values.
-    metric : str, Callable, list
-        Metric used to quantify the goodness of fit of the model.
-        
-        - If `string`: {'mean_squared_error', 'mean_absolute_error',
-        'mean_absolute_percentage_error', 'mean_squared_log_error',
-        'mean_absolute_scaled_error', 'root_mean_squared_scaled_error'}
-        - If `Callable`: Function with arguments `y_true`, `y_pred` and `y_train`
-        (Optional) that returns a float.
-        - If `list`: List containing multiple strings and/or Callables.
-    aggregate_metric : str, list, default `['weighted_average', 'average', 'pooling']`
-        Aggregation method/s used to combine the metric/s of all levels (series)
-        when multiple levels are predicted. If list, the first aggregation method
-        is used to select the best parameters.
-
-        - 'average': the average (arithmetic mean) of all levels.
-        - 'weighted_average': the average of the metrics weighted by the number of
-        predicted values of each level.
-        - 'pooling': the values of all levels are pooled and then the metric is
-        calculated.
-    levels : str, list, default None
-        level (`str`) or levels (`list`) at which the forecaster is optimized. 
-        If `None`, all levels are taken into account.
-    exog : pandas Series, pandas DataFrame, dict, default None
-        Exogenous variables.
-    n_trials : int, default 10
-        Number of parameter settings that are sampled in each lag configuration.
-    random_state : int, default 123
-        Sets a seed to the sampling for reproducible output.
-    return_best : bool, default True
-        Refit the `forecaster` using the best found parameters on the whole data.
-    n_jobs : int, 'auto', default 'auto'
-        The number of jobs to run in parallel. If `-1`, then the number of jobs is 
-        set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
-    verbose : bool, default False
-        Print number of folds used for cv or backtesting.
-    show_progress : bool, default True
-        Whether to show a progress bar.
-    suppress_warnings: bool, default False
-        If `True`, skforecast warnings will be suppressed during the hyperparameter
-        search. See skforecast.exceptions.warn_skforecast_categories for more
-        information.
-    output_file : str, default None
-        Specifies the filename or full path where the results should be saved. 
-        The results will be saved in a tab-separated values (TSV) format. If 
-        `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
-    kwargs_create_study : dict, default {}
-        Additional keyword arguments (key, value mappings) to pass to optuna.create_study().
-        If default, the direction is set to 'minimize' and a TPESampler(seed=123) 
-        sampler is used during optimization.
-    kwargs_study_optimize : dict, default {}
-        Additional keyword arguments (key, value mappings) to pass to study.optimize().
-
-    Returns
-    -------
-    results : pandas DataFrame
-        Results for each combination of parameters.
-
-        - column levels: levels configuration for each iteration.
-        - column lags: lags configuration for each iteration.
-        - column params: parameters configuration for each iteration.
-        - column metric: metric value estimated for each iteration. The resulting 
-        metric will be the average of the optimization of all levels.
-        - additional n columns with param = value.
-    best_trial : optuna object
-        The best optimization result returned as a FrozenTrial optuna object.
-    
-    """
-
-    if return_best and exog is not None and (len(exog) != len(series)):
-        raise ValueError(
-            f"`exog` must have same number of samples as `series`. "
-            f"length `exog`: ({len(exog)}), length `series`: ({len(series)})"
-        )
-   
-    results, best_trial = _bayesian_search_optuna_multiseries(
-                              forecaster            = forecaster,
-                              series                = series,
-                              cv                    = cv,
-                              exog                  = exog,
-                              levels                = levels, 
-                              search_space          = search_space,
-                              metric                = metric,
-                              aggregate_metric      = aggregate_metric,
-                              n_trials              = n_trials,
-                              random_state          = random_state,
-                              return_best           = return_best,
-                              n_jobs                = n_jobs,
-                              verbose               = verbose,
-                              show_progress         = show_progress,
-                              suppress_warnings     = suppress_warnings,
-                              output_file           = output_file,
-                              kwargs_create_study   = kwargs_create_study,
-                              kwargs_study_optimize = kwargs_study_optimize
-                          )
-        
-    return results, best_trial
-
-
-def _bayesian_search_optuna_multiseries(
-    forecaster: object,
-    series: pd.DataFrame | dict[str, pd.Series | pd.DataFrame],
-    cv: TimeSeriesFold | OneStepAheadFold,
-    search_space: Callable,
-    metric: str | Callable | list[str | Callable],
-    aggregate_metric: str | list[str] = ['weighted_average', 'average', 'pooling'],
-    levels: str | list[str] | None = None,
-    exog: pd.Series | pd.DataFrame | dict[str, pd.Series | pd.DataFrame] | None = None,
-    n_trials: int = 10,
-    random_state: int = 123,
-    return_best: bool = True,
-    n_jobs: int | str = 'auto',
-    verbose: bool = False,
-    show_progress: bool = True,
-    suppress_warnings: bool = False,
-    output_file: str | None = None,
-    kwargs_create_study: dict = {},
-    kwargs_study_optimize: dict = {}
+    kwargs_create_study: dict | None = None,
+    kwargs_study_optimize: dict | None = None
 ) -> tuple[pd.DataFrame, object]:
     """
     Bayesian search for hyperparameters of a Forecaster object using optuna library.
@@ -1719,10 +1615,11 @@ def _bayesian_search_optuna_multiseries(
         - If `Callable`: Function with arguments `y_true`, `y_pred` and `y_train`
         (Optional) that returns a float.
         - If `list`: List containing multiple strings and/or Callables.
-    aggregate_metric : str, list, default `['weighted_average', 'average', 'pooling']`
+    aggregate_metric : str, list, default None
         Aggregation method/s used to combine the metric/s of all levels (series)
         when multiple levels are predicted. If list, the first aggregation method
-        is used to select the best parameters.
+        is used to select the best parameters. If `None`,
+        `['weighted_average', 'average', 'pooling']` is used.
 
         - 'average': the average (arithmetic mean) of all levels.
         - 'weighted_average': the average of the metrics weighted by the number of
@@ -1734,16 +1631,21 @@ def _bayesian_search_optuna_multiseries(
         If `None`, all levels are taken into account.
     exog : pandas Series, pandas DataFrame, dict, default None
         Exogenous variables.
-    n_trials : int, default 10
-        Number of parameter settings that are sampled in each lag configuration.
+    n_trials : int, default 20
+        Number of parameter settings that are sampled in each lag configuration. 
+        The first 10 trials are random (controlled by optuna's `n_startup_trials`); 
+        the TPE sampler only guides the search from trial 11 onward. For meaningful 
+        Bayesian optimization, `n_trials` should be significantly larger than 10.
     random_state : int, default 123
-        Sets a seed to the sampling for reproducible output.
+        Sets a seed to the sampling for reproducible output. When a new sampler 
+        is passed in `kwargs_create_study`, the seed must be set within the 
+        sampler. For example `{'sampler': TPESampler(seed=145)}`.
     return_best : bool, default True
         Refit the `forecaster` using the best found parameters on the whole data.
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
     show_progress : bool, default True
@@ -1753,15 +1655,16 @@ def _bayesian_search_optuna_multiseries(
         search. See skforecast.exceptions.warn_skforecast_categories for more
         information.
     output_file : str, default None
-        Specifies the filename or full path where the results should be saved. 
-        The results will be saved in a tab-separated values (TSV) format. If 
-        `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
-    kwargs_create_study : dict, default {}
+        Specifies the filename or full path where the optuna logging output
+        should be saved. If `None`, logging output will not be redirected to
+        a file.
+    kwargs_create_study : dict, default None
         Additional keyword arguments (key, value mappings) to pass to optuna.create_study().
-        If default, the direction is set to 'minimize' and a TPESampler(seed=123) 
+        If default, the direction is set to 'minimize' for regression tasks or
+        'maximize' for classification tasks, and a 
+        `TPESampler(multivariate=True, group=True, seed=random_state)` 
         sampler is used during optimization.
-    kwargs_study_optimize : dict, default {}
+    kwargs_study_optimize : dict, default None
         Additional keyword arguments (key, value mappings) to pass to study.optimize().
 
     Returns
@@ -1769,23 +1672,43 @@ def _bayesian_search_optuna_multiseries(
     results : pandas DataFrame
         Results for each combination of parameters.
 
+        - column trial_number: optuna trial number for each iteration. Use
+          `study.trials[trial_number]` to access the full optuna trial object.
         - column levels: levels configuration for each iteration.
         - column lags: lags configuration for each iteration.
-        - column lags_label: descriptive label or alias for the lags.
         - column params: parameters configuration for each iteration.
-        - n columns with metrics: metric/s value/s estimated for each iteration.
-        There is one column for each metric and aggregation method. The name of
-        the column follows the pattern `metric__aggregation`.
+        - column metric: metric value estimated for each iteration. The resulting 
+        metric will be the average of the optimization of all levels.
         - additional n columns with param = value.
-    best_trial : optuna object
-        The best optimization result returned as an optuna FrozenTrial object.
-
-    """
+    study : optuna Study
+        The optuna study object containing all optimization trials. Access the
+        best trial via `study.best_trial`.
     
-    set_skforecast_warnings(suppress_warnings, action='ignore')
+    """
 
-    forecaster_name = type(forecaster).__name__
+    forecaster_search = deepcopy_forecaster(forecaster)
+    forecaster_name = forecaster_search.__skforecast_tags__['forecaster_name']
     cv_name = type(cv).__name__
+
+    if forecaster_name == 'ForecasterRecursiveMultiSeries':
+        series, series_indexes = check_preprocess_series(series)
+        if exog is not None:
+            series_names_in_ = list(series.keys())
+            exog_dict = {serie: None for serie in series_names_in_}
+            exog, _ = check_preprocess_exog_multiseries(
+                          series_names_in_  = series_names_in_,
+                          series_index_type = type(series_indexes[series_names_in_[0]]),
+                          exog              = exog,
+                          exog_dict         = exog_dict
+                      )
+    else:
+        # TODO: This only applies to wide DataFrames. Delete when input is always dict
+        # in all forecasters.
+        if return_best and exog is not None and (len(exog) != len(series)):
+            raise ValueError(
+                f"`exog` must have same number of samples as `series`. "
+                f"length `exog`: ({len(exog)}), length `series`: ({len(series)})"
+            )
 
     if cv_name not in ['TimeSeriesFold', 'OneStepAheadFold']:
         raise TypeError(
@@ -1796,7 +1719,7 @@ def _bayesian_search_optuna_multiseries(
     if cv_name == 'OneStepAheadFold':
 
         check_one_step_ahead_input(
-            forecaster        = forecaster,
+            forecaster        = forecaster_search,
             cv                = cv,
             metric            = metric,
             series            = series,
@@ -1805,20 +1728,15 @@ def _bayesian_search_optuna_multiseries(
             suppress_warnings = suppress_warnings
         )
 
-        cv = deepcopy(cv)
         initial_train_size = date_to_index_position(
                                  index        = cv._extract_index(series), 
                                  date_input   = cv.initial_train_size, 
                                  method       = 'validation',
                                  date_literal = 'initial_train_size'
                              )
-        cv.set_params({
-            'initial_train_size': initial_train_size,
-            'window_size': forecaster.window_size,
-            'differentiation': forecaster.differentiation_max,
-            'verbose': verbose
-        })
     
+    if aggregate_metric is None:
+        aggregate_metric = ['weighted_average', 'average', 'pooling']
     if isinstance(aggregate_metric, str):
         aggregate_metric = [aggregate_metric]
     allowed_aggregate_metrics = ['average', 'weighted_average', 'pooling']
@@ -1843,7 +1761,7 @@ def _bayesian_search_optuna_multiseries(
         )
     
     levels = _initialize_levels_model_selection_multiseries(
-                 forecaster = forecaster,
+                 forecaster = forecaster_search,
                  series     = series,
                  levels     = levels
              )
@@ -1861,7 +1779,7 @@ def _bayesian_search_optuna_multiseries(
         def _objective(
             trial,
             search_space          = search_space,
-            forecaster            = forecaster,
+            forecaster_search     = forecaster_search,
             series                = series,
             cv                    = cv,
             exog                  = exog,
@@ -1876,13 +1794,20 @@ def _bayesian_search_optuna_multiseries(
         ) -> float:
             
             sample = search_space(trial)
+            if sample.keys() != trial.params.keys():
+                raise ValueError(
+                    f"`search_space` dict keys must match the names passed to "
+                    f"`trial.suggest_*()`.\n"
+                    f"  Dict keys    : {list(sample.keys())}\n"
+                    f"  Suggest names: {list(trial.params.keys())}"
+                )
             sample_params = {k: v for k, v in sample.items() if k != 'lags'}
-            forecaster.set_params(sample_params)
+            forecaster_search.set_params(sample_params)
             if "lags" in sample:
-                forecaster.set_lags(sample['lags'])
+                forecaster_search.set_lags(sample['lags'])
             
             metrics, _ = backtesting_forecaster_multiseries(
-                             forecaster            = forecaster,
+                             forecaster            = forecaster_search,
                              series                = series,
                              cv                    = cv,
                              exog                  = exog,
@@ -1904,18 +1829,22 @@ def _bayesian_search_optuna_multiseries(
                           columns = metric_names
                       )
             
-            # Store metrics in the variable `metrics_list` defined outside _objective.
-            nonlocal metrics_list
-            metrics_list.append(metrics)
+            # Store all metrics in the trial using optuna's user_attrs mechanism.
+            for m_name in metric_names:
+                trial.set_user_attr(m_name, float(metrics.loc[0, m_name]))
 
             return metrics.loc[0, metric_names[0]]
     
     else:
 
+        _SENTINEL = object()
+        _MAX_CACHE_SIZE = 10
+        _cached_split = {}
+
         def _objective(
             trial,
             search_space          = search_space,
-            forecaster            = forecaster,
+            forecaster_search     = forecaster_search,
             series                = series,
             cv                    = cv,
             exog                  = exog,
@@ -1923,28 +1852,60 @@ def _bayesian_search_optuna_multiseries(
             metric                = metric,
             add_aggregated_metric = add_aggregated_metric,
             aggregate_metric      = aggregate_metric,
-            metric_names          = metric_names,
+            metric_names          = metric_names
         ) -> float:
             
             sample = search_space(trial)
+            if sample.keys() != trial.params.keys():
+                raise ValueError(
+                    f"`search_space` dict keys must match the names passed to "
+                    f"`trial.suggest_*()`.\n"
+                    f"  Dict keys    : {list(sample.keys())}\n"
+                    f"  Suggest names: {list(trial.params.keys())}"
+                )
             sample_params = {k: v for k, v in sample.items() if k != 'lags'}
-            forecaster.set_params(sample_params)
-            if "lags" in sample:
-                forecaster.set_lags(sample['lags'])
-            
-            (
-                X_train,
-                y_train,
-                X_test,
-                y_test,
-                X_train_encoding,
-                X_test_encoding
-            ) = forecaster._train_test_split_one_step_ahead(
-                series=series, exog=exog, initial_train_size=cv.initial_train_size,
-            )
+            forecaster_search.set_params(sample_params)
+
+            current_lags = sample.get('lags', _SENTINEL)
+            if current_lags is not _SENTINEL:
+                forecaster_search.set_lags(current_lags)
+
+            lags_key = _make_lags_hashable(current_lags, sentinel=_SENTINEL)
+            if lags_key not in _cached_split:
+
+                if len(_cached_split) >= _MAX_CACHE_SIZE:
+                    _cached_split.pop(next(iter(_cached_split)))
+
+                (
+                    X_train,
+                    y_train,
+                    X_test,
+                    y_test,
+                    X_train_encoding,
+                    X_test_encoding,
+                    sample_weight,
+                    fit_kwargs
+                ) = forecaster_search._train_test_split_one_step_ahead(
+                    series=series, exog=exog, initial_train_size=initial_train_size,
+                )
+                _cached_split[lags_key] = (
+                    X_train, y_train, X_test, y_test, X_train_encoding, X_test_encoding,
+                    sample_weight, fit_kwargs,
+                    _get_estimator_categorical_set_params(forecaster_search)
+                )
+            else:
+                (
+                    X_train, y_train, X_test, y_test,
+                    X_train_encoding, X_test_encoding,
+                    sample_weight, fit_kwargs,
+                    _estimator_cat_params
+                ) = _cached_split[lags_key]
+                _restore_estimator_categorical_set_params(
+                    forecaster_search, _estimator_cat_params
+                )
 
             metrics, _ = _predict_and_calculate_metrics_one_step_ahead_multiseries(
-                             forecaster            = forecaster,
+                             forecaster            = forecaster_search,
                              series                = series,
                              X_train               = X_train,
                              y_train               = y_train,
@@ -1954,7 +1915,10 @@ def _bayesian_search_optuna_multiseries(
                              X_test_encoding       = X_test_encoding,
                              levels                = levels,
                              metrics               = metric,
-                             add_aggregated_metric = add_aggregated_metric
+                             add_aggregated_metric = add_aggregated_metric,
+                             sample_weight         = sample_weight,
+                             fit_kwargs            = fit_kwargs,
+                             return_predictions    = False
                          )
 
             if add_aggregated_metric:
@@ -1966,14 +1930,31 @@ def _bayesian_search_optuna_multiseries(
                           columns = metric_names
                       )
             
-            # Store metrics in the variable `metrics_list` defined outside _objective.
-            nonlocal metrics_list
-            metrics_list.append(metrics)
+            # Store all metrics in the trial using optuna's user_attrs mechanism.
+            for m_name in metric_names:
+                trial.set_user_attr(m_name, float(metrics.loc[0, m_name]))
 
             return metrics.loc[0, metric_names[0]]
-
+    
+    is_regression = forecaster_search.__skforecast_tags__['forecaster_task'] == 'regression'
+    kwargs_create_study = kwargs_create_study.copy() if kwargs_create_study is not None else {}
+    if 'direction' not in kwargs_create_study:
+        kwargs_create_study['direction'] = 'minimize' if is_regression else 'maximize'
+    if 'sampler' not in kwargs_create_study:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                'ignore',
+                message='.*multivariate.*|.*group.*'
+            )
+            kwargs_create_study['sampler'] = TPESampler(
+                multivariate=True, group=True, seed=random_state
+            )
+    
+    kwargs_study_optimize = kwargs_study_optimize.copy() if kwargs_study_optimize is not None else {}
     if show_progress:
         kwargs_study_optimize['show_progress_bar'] = True
+    else:
+        kwargs_study_optimize.setdefault('show_progress_bar', False)
     
     if output_file is not None:
         # Redirect optuna logging to file
@@ -1989,46 +1970,37 @@ def _bayesian_search_optuna_multiseries(
         logging.getLogger("optuna").setLevel(logging.WARNING)
         optuna.logging.disable_default_handler()
 
-    # `metrics_list` will be modified inside _objective function. 
-    # It is a trick to extract multiple values from _objective since
-    # only the optimized value can be returned.
-    metrics_list = []
-
-    warnings.filterwarnings(
-        "ignore",
-        category=UserWarning,
-        message="Choices for a categorical distribution should be*"
-    )
-
     study = optuna.create_study(**kwargs_create_study)
 
-    if 'sampler' not in kwargs_create_study.keys():
-        study.sampler = TPESampler(seed=random_state)
-
-    study.optimize(_objective, n_trials=n_trials, **kwargs_study_optimize)
-    best_trial = study.best_trial
-
-    if output_file is not None:
-        handler.close()
-       
-    if search_space(best_trial).keys() != best_trial.params.keys():
-        raise ValueError(
-            f"Some of the key values do not match the search_space key names.\n"
-            f"  Search Space keys  : {list(search_space(best_trial).keys())}\n"
-            f"  Trial objects keys : {list(best_trial.params.keys())}"
-        )
-    warnings.filterwarnings('default')
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=UserWarning,
+                message="Choices for a categorical distribution should be*"
+            )
+            study.optimize(_objective, n_trials=n_trials, **kwargs_study_optimize)
+    finally:
+        if output_file is not None:
+            handler.close()
+            logger.removeHandler(handler)
     
     lags_list = []
     params_list = []
-    for trial in study.get_trials():
-        regressor_params = {k: v for k, v in trial.params.items() if k != 'lags'}
+    metrics_data = []
+    trial_number_list = []
+    for trial in study.get_trials(states=[TrialState.COMPLETE]):
+        estimator_params = {k: v for k, v in trial.params.items() if k != 'lags'}
         lags = trial.params.get(
-                   'lags',
-                   forecaster.lags if hasattr(forecaster, 'lags') else None
-               )
-        params_list.append(regressor_params)
+            'lags',
+            forecaster_search.lags if hasattr(forecaster_search, 'lags') else None
+        )
+        params_list.append(estimator_params)
         lags_list.append(lags)
+        trial_number_list.append(trial.number)
+        metrics_data.append(
+            {m_name: trial.user_attrs[m_name] for m_name in metric_names}
+        )
     
     if forecaster_name not in ['ForecasterDirectMultiVariate']:
         lags_list = [
@@ -2056,13 +2028,14 @@ def _bayesian_search_optuna_multiseries(
         
         lags_list = lags_list_initialized
 
-    results = pd.concat(metrics_list, axis=0)
-    results.insert(0, 'levels', [levels] * len(results))
-    results.insert(1, 'lags', lags_list)
-    results.insert(2, 'params', params_list)
+    results = pd.DataFrame(metrics_data)
+    results.insert(0, 'trial_number', trial_number_list)
+    results.insert(1, 'levels', [levels] * len(results))
+    results.insert(2, 'lags', lags_list)
+    results.insert(3, 'params', params_list)
     results = (
         results
-        .sort_values(by=metric_names[0], ascending=True)
+        .sort_values(by=metric_names[0], ascending=True if is_regression else False)
         .reset_index(drop=True)
     )
     results = pd.concat([results, results['params'].apply(pd.Series)], axis=1)
@@ -2073,6 +2046,7 @@ def _bayesian_search_optuna_multiseries(
         best_params = results.loc[0, 'params']
         best_metric = results.loc[0, metric_names[0]]
         
+        # NOTE: Here we use the actual forecaster passed by the user
         forecaster.set_lags(best_lags)
         forecaster.set_params(best_params)
 
@@ -2088,21 +2062,21 @@ def _bayesian_search_optuna_multiseries(
         else:
             levels_print = levels
         
-        print(
-            f"`Forecaster` refitted using the best-found lags and parameters, "
-            f"and the whole data set: \n"
-            f"  Lags: {best_lags} \n"
-            f"  Parameters: {best_params}\n"
-            f"  Backtesting metric: {best_metric}\n"
-            f"  Levels: {levels_print}\n"
-        )
+        if verbose:
+            print(
+                f"`Forecaster` refitted using the best-found lags and parameters, "
+                f"and the whole data set: \n"
+                f"  Lags: {best_lags} \n"
+                f"  Parameters: {best_params}\n"
+                f"  {'Backtesting' if cv_name == 'TimeSeriesFold' else 'One-step-ahead'} "
+                f"metric: {best_metric}\n"
+                f"  Levels: {levels_print}"
+            )
 
-    set_skforecast_warnings(suppress_warnings, action='default')
-            
-    return results, best_trial
+    return results, study
 
 
-def grid_search_sarimax(
+def grid_search_stats(
     forecaster: object,
     y: pd.Series,
     cv: TimeSeriesFold,
@@ -2112,23 +2086,22 @@ def grid_search_sarimax(
     return_best: bool = True,
     n_jobs: int | str = 'auto',
     verbose: bool = False,
-    suppress_warnings_fit: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None
 ) -> pd.DataFrame:
     """
-    Exhaustive search over specified parameter values for a ForecasterSarimax object.
+    Exhaustive search over specified parameter values for a ForecasterStats object.
     Validation is done using time series backtesting.
     
     Parameters
     ----------
-    forecaster : ForecasterSarimax
+    forecaster : ForecasterStats
         Forecaster model.
     y : pandas Series
         Training time series. 
     cv : TimeSeriesFold
         TimeSeriesFold object with the information needed to split the data into folds.
-        **New in version 0.14.0**
     param_grid : dict
         Dictionary with parameters names (`str`) as keys and lists of parameter
         settings to try as values.
@@ -2150,18 +2123,19 @@ def grid_search_sarimax(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
-    suppress_warnings_fit : bool, default False
-        If `True`, warnings generated during fitting will be ignored.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings : bool, default False
+        If `True`, skforecast warnings will be suppressed during the hyperparameter 
+        search. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -2176,25 +2150,25 @@ def grid_search_sarimax(
 
     param_grid = list(ParameterGrid(param_grid))
 
-    results = _evaluate_grid_hyperparameters_sarimax(
-        forecaster            = forecaster,
-        y                     = y,
-        cv                    = cv,
-        param_grid            = param_grid,
-        metric                = metric,
-        exog                  = exog,
-        return_best           = return_best,
-        n_jobs                = n_jobs,
-        verbose               = verbose,
-        suppress_warnings_fit = suppress_warnings_fit,
-        show_progress         = show_progress,
-        output_file           = output_file
+    results = _evaluate_grid_hyperparameters_stats(
+        forecaster        = forecaster,
+        y                 = y,
+        cv                = cv,
+        param_grid        = param_grid,
+        metric            = metric,
+        exog              = exog,
+        return_best       = return_best,
+        n_jobs            = n_jobs,
+        verbose           = verbose,
+        suppress_warnings = suppress_warnings,
+        show_progress     = show_progress,
+        output_file       = output_file
     )
 
     return results
 
 
-def random_search_sarimax(
+def random_search_stats(
     forecaster: object,
     y: pd.Series,
     cv: TimeSeriesFold,
@@ -2206,23 +2180,22 @@ def random_search_sarimax(
     return_best: bool = True,
     n_jobs: int | str = 'auto',
     verbose: bool = False,
-    suppress_warnings_fit: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None
 ) -> pd.DataFrame:
     """
-    Random search over specified parameter values or distributions for a Forecaster 
+    Random search over specified parameter values or distributions for a ForecasterStats 
     object. Validation is done using time series backtesting.
     
     Parameters
     ----------
-    forecaster : ForecasterSarimax
+    forecaster : ForecasterStats
         Forecaster model.
     y : pandas Series
         Training time series. 
     cv : TimeSeriesFold
         TimeSeriesFold object with the information needed to split the data into folds.
-        **New in version 0.14.0**
     param_distributions : dict
         Dictionary with parameters names (`str`) as keys and 
         distributions or lists of parameters to try.
@@ -2249,18 +2222,19 @@ def random_search_sarimax(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
-    suppress_warnings_fit : bool, default False
-        If `True`, warnings generated during fitting will be ignored.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings : bool, default False
+        If `True`, skforecast warnings will be suppressed during the hyperparameter 
+        search. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -2275,25 +2249,26 @@ def random_search_sarimax(
 
     param_grid = list(ParameterSampler(param_distributions, n_iter=n_iter, random_state=random_state))
 
-    results = _evaluate_grid_hyperparameters_sarimax(
-        forecaster            = forecaster,
-        y                     = y,
-        cv                    = cv,
-        param_grid            = param_grid,
-        metric                = metric,
-        exog                  = exog,
-        return_best           = return_best,
-        n_jobs                = n_jobs,
-        verbose               = verbose,
-        suppress_warnings_fit = suppress_warnings_fit,
-        show_progress         = show_progress,
-        output_file           = output_file
+    results = _evaluate_grid_hyperparameters_stats(
+        forecaster        = forecaster,
+        y                 = y,
+        cv                = cv,
+        param_grid        = param_grid,
+        metric            = metric,
+        exog              = exog,
+        return_best       = return_best,
+        n_jobs            = n_jobs,
+        verbose           = verbose,
+        suppress_warnings = suppress_warnings,
+        show_progress     = show_progress,
+        output_file       = output_file
     )
 
     return results
 
 
-def _evaluate_grid_hyperparameters_sarimax(
+@manage_warnings
+def _evaluate_grid_hyperparameters_stats(
     forecaster: object,
     y: pd.Series,
     cv: TimeSeriesFold,
@@ -2303,8 +2278,8 @@ def _evaluate_grid_hyperparameters_sarimax(
     return_best: bool = True,
     n_jobs: int | str = 'auto',
     verbose: bool = False,
-    suppress_warnings_fit: bool = False,
     show_progress: bool = True,
+    suppress_warnings: bool = False,
     output_file: str | None = None
 ) -> pd.DataFrame:
     """
@@ -2312,13 +2287,12 @@ def _evaluate_grid_hyperparameters_sarimax(
     
     Parameters
     ----------
-    forecaster : ForecasterSarimax
+    forecaster : ForecasterStats
         Forecaster model.
     y : pandas Series
         Training time series. 
     cv : TimeSeriesFold
         TimeSeriesFold object with the information needed to split the data into folds.
-        **New in version 0.14.0**
     param_grid : dict
         Dictionary with parameters names (`str`) as keys and lists of parameter
         settings to try as values.
@@ -2340,18 +2314,19 @@ def _evaluate_grid_hyperparameters_sarimax(
     n_jobs : int, 'auto', default 'auto'
         The number of jobs to run in parallel. If `-1`, then the number of jobs is 
         set to the number of cores. If 'auto', `n_jobs` is set using the function
-        skforecast.utils.select_n_jobs_backtesting.
+        skforecast.utils.select_n_jobs_backtesting. Ignored for `OneStepAheadFold`.
     verbose : bool, default False
         Print number of folds used for cv or backtesting.
-    suppress_warnings_fit : bool, default False
-        If `True`, warnings generated during fitting will be ignored.
     show_progress : bool, default True
         Whether to show a progress bar.
+    suppress_warnings: bool, default False
+        If `True`, skforecast warnings will be suppressed during the backtesting 
+        process. See skforecast.exceptions.warn_skforecast_categories for more
+        information.
     output_file : str, default None
         Specifies the filename or full path where the results should be saved. 
         The results will be saved in a tab-separated values (TSV) format. If 
         `None`, the results will not be saved to a file.
-        **New in version 0.12.0**
 
     Returns
     -------
@@ -2363,6 +2338,21 @@ def _evaluate_grid_hyperparameters_sarimax(
         - additional n columns with param = value.
 
     """
+    
+    if type(forecaster).__name__  != 'ForecasterStats':
+        raise TypeError(
+            "`forecaster` must be of type `ForecasterStats`, for all other "
+            "types of forecasters use the functions available in the "
+            "`model_selection` module."
+        )
+
+    if forecaster.n_estimators != 1:
+        raise ValueError(
+            f"Hyperparameter search with `ForecasterStats` is only available when "
+            f"the forecaster contains a single estimator. Got {forecaster.n_estimators} "
+            f"estimators: {forecaster.estimator_ids}. Initialize `ForecasterStats` with a single "
+            f"estimator to perform hyperparameter search."
+        )
 
     if return_best and exog is not None and (len(exog) != len(y)):
         raise ValueError(
@@ -2370,17 +2360,22 @@ def _evaluate_grid_hyperparameters_sarimax(
             f"length `exog`: ({len(exog)}), length `y`: ({len(y)})"
         )
 
+    forecaster_search = deepcopy_forecaster(forecaster)
+
     if not isinstance(metric, list):
-        metric = [metric] 
-    metric_dict = {(m if isinstance(m, str) else m.__name__): [] 
-                   for m in metric}
+        metric = [metric]
+    metric_dict = {
+        (m if isinstance(m, str) else m.__name__): [] 
+        for m in metric
+    }
     
     if len(metric_dict) != len(metric):
         raise ValueError(
             "When `metric` is a `list`, each metric name must be unique."
         )
 
-    print(f"Number of models compared: {len(param_grid)}.")
+    if verbose:
+        print(f"Number of models compared: {len(param_grid)}.")
 
     if show_progress:
         param_grid = tqdm(param_grid, desc='params grid', position=0)
@@ -2391,20 +2386,26 @@ def _evaluate_grid_hyperparameters_sarimax(
     params_list = []
     for params in param_grid:
 
-        forecaster.set_params(params)
-        metric_values = backtesting_sarimax(
-                            forecaster            = forecaster,
-                            y                     = y,
-                            cv                    = cv,
-                            metric                = metric,
-                            exog                  = exog,
-                            alpha                 = None,
-                            interval              = None,
-                            n_jobs                = n_jobs,
-                            verbose               = verbose,
-                            suppress_warnings_fit = suppress_warnings_fit,
-                            show_progress         = False
-                        )[0]
+        try:
+            forecaster_search.set_params(params)
+            metric_values = backtesting_stats(
+                                forecaster        = forecaster_search,
+                                y                 = y,
+                                cv                = cv,
+                                metric            = metric,
+                                exog              = exog,
+                                alpha             = None,
+                                interval          = None,
+                                freeze_params     = True,
+                                n_jobs            = n_jobs,
+                                verbose           = verbose,
+                                show_progress     = False,
+                                suppress_warnings = suppress_warnings
+                            )[0]
+        except Exception as e:
+            warnings.warn(f"Parameters skipped: {params}. {e}", RuntimeWarning)
+            continue
+        
         metric_values = metric_values.iloc[0, :].to_list()
         warnings.filterwarnings(
             'ignore', category=RuntimeWarning, message= "The forecaster will be fit.*"
@@ -2437,19 +2438,27 @@ def _evaluate_grid_hyperparameters_sarimax(
         .reset_index(drop=True)
     )
     results = pd.concat([results, results['params'].apply(pd.Series)], axis=1)
-    
+
+    if results.empty:
+        warnings.warn(
+            "No valid parameter combinations found. All combinations raised exceptions.",
+            RuntimeWarning
+        )
+        return results
+
     if return_best:
         
         best_params = results.loc[0, 'params']
         best_metric = results.loc[0, list(metric_dict.keys())[0]]
         forecaster.set_params(best_params)
-        forecaster.fit(y=y, exog=exog, suppress_warnings=suppress_warnings_fit)
+        forecaster.fit(y=y, exog=exog, suppress_warnings=suppress_warnings)
         
-        print(
-            f"`Forecaster` refitted using the best-found parameters, "
-            f"and the whole data set: \n"
-            f"  Parameters: {best_params}\n"
-            f"  Backtesting metric: {best_metric}\n"
-        )
+        if verbose:
+            print(
+                f"`Forecaster` refitted using the best-found parameters, "
+                f"and the whole data set: \n"
+                f"  Parameters: {best_params}\n"
+                f"  Backtesting metric: {best_metric}\n"
+            )
             
     return results

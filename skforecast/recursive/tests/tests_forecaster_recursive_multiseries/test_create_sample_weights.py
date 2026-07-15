@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
 from ....recursive import ForecasterRecursiveMultiSeries
+from ....preprocessing import reshape_series_wide_to_long
 
 
 def custom_weights(index):  # pragma: no cover
@@ -61,23 +62,9 @@ series = pd.DataFrame(
         ]
     ),
     columns=["series_1", "series_2"],
-    index=pd.DatetimeIndex(
-        [
-            "2022-01-04",
-            "2022-01-05",
-            "2022-01-06",
-            "2022-01-07",
-            "2022-01-08",
-            "2022-01-09",
-            "2022-01-10",
-            "2022-01-11",
-            "2022-01-12",
-            "2022-01-13",
-        ],
-        dtype="datetime64[ns]",
-        freq="D",
-    ),
+    index=pd.date_range(start="2022-01-04", periods=10, freq="D")
 )
+series = reshape_series_wide_to_long(series)
 
 X_train_onehot = pd.DataFrame(
     data=np.array(
@@ -246,6 +233,16 @@ X_train_ordinal_category_diferent_length["_level_skforecast"] = (
 )
 
 
+def _short_id(dt):  # pragma: no cover
+    """Short identifier for parametrize ids."""
+    s = str(dt)
+    if len(s) <= 100:
+        return s
+    if hasattr(dt, 'shape'):
+        return f'{type(dt).__name__}{dt.shape}'
+    return s[:100]
+
+
 @pytest.mark.parametrize(
     "encoding, X_train",
     [
@@ -254,14 +251,14 @@ X_train_ordinal_category_diferent_length["_level_skforecast"] = (
         ("onehot", X_train_onehot),
         (None, X_train_ordinal)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_output_using_series_weights(encoding, X_train):
     """
     Test `sample_weights` creation using `series_weights`.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LinearRegression(),
+        estimator=LinearRegression(),
         lags=3,
         encoding=encoding,
         series_weights={"series_1": 1.0, "series_2": 2.0},
@@ -287,14 +284,14 @@ def test_create_sample_weights_output_using_series_weights(encoding, X_train):
         ("onehot", X_train_onehot),
         (None, X_train_ordinal)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_output_using_weight_func(encoding, X_train):
     """
     Test `sample_weights` creation using `weight_func`.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LinearRegression(),
+        estimator=LinearRegression(),
         lags=3,
         encoding=encoding,
         weight_func=custom_weights,
@@ -329,14 +326,14 @@ def test_create_sample_weights_output_using_weight_func(encoding, X_train):
             np.array([1, 0, 0, 0, 1, 1, 1, 3, 3, 3, 3, 2, 2, 2]),
         ),
     ],
-    ids=lambda values: f"levels: {values}",
+    ids=_short_id,
 )
 def test_create_sample_weights_output_using_weight_func_dict(weight_func, expected):
     """
     Test `sample_weights` creation using `weight_func`.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = "ordinal",
                      transformer_series = StandardScaler(),
@@ -366,7 +363,7 @@ def test_create_sample_weights_output_using_weight_func_dict(weight_func, expect
             np.array([1, 0, 0, 0, 1, 1, 1, 3, 2, 2, 2]),
         ),
     ],
-    ids=lambda values: f"levels: {values}",
+    ids=_short_id,
 )
 def test_create_sample_weights_output_using_weight_func_dict_different_series_lengths(
     weight_func, expected
@@ -375,7 +372,7 @@ def test_create_sample_weights_output_using_weight_func_dict_different_series_le
     Test `sample_weights` creation using `weight_func` with series of different lengths.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = "ordinal",
                      transformer_series = StandardScaler(),
@@ -398,7 +395,7 @@ def test_create_sample_weights_output_using_weight_func_dict_different_series_le
         ("onehot", X_train_onehot),
         (None, X_train_ordinal)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_output_using_series_weights_and_weight_func(
     encoding, X_train
@@ -407,7 +404,7 @@ def test_create_sample_weights_output_using_series_weights_and_weight_func(
     Test `sample_weights` creation using `series_weights` and `weight_func`.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = encoding,
                      transformer_series = StandardScaler(),
@@ -432,7 +429,7 @@ def test_create_sample_weights_output_using_series_weights_and_weight_func(
         ("onehot", X_train_onehot_diferent_length),
         (None, X_train_ordinal_diferent_length)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_output_using_series_weights_and_weight_func_different_series_lengths(
     encoding, X_train
@@ -442,7 +439,7 @@ def test_create_sample_weights_output_using_series_weights_and_weight_func_diffe
     with series of different lengths.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = encoding,
                      transformer_series = StandardScaler(),
@@ -467,14 +464,14 @@ def test_create_sample_weights_output_using_series_weights_and_weight_func_diffe
         ("onehot", X_train_onehot),
         (None, X_train_ordinal)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_ValueError_when_weights_has_nan(encoding, X_train):
     """
     Test sample_weights ValueError when sample_weight contains NaNs.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = encoding,
                      transformer_series = StandardScaler(),
@@ -497,7 +494,7 @@ def test_create_sample_weights_ValueError_when_weights_has_nan(encoding, X_train
         ("onehot", X_train_onehot),
         (None, X_train_ordinal)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_ValueError_when_weights_has_negative_values(
     encoding, X_train
@@ -506,7 +503,7 @@ def test_create_sample_weights_ValueError_when_weights_has_negative_values(
     Test sample_weights ValueError when sample_weight contains negative values.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = encoding,
                      transformer_series = StandardScaler(),
@@ -529,14 +526,14 @@ def test_create_sample_weights_ValueError_when_weights_has_negative_values(
         ("onehot", X_train_onehot),
         (None, X_train_ordinal)
     ],
-    ids=lambda dt: f"encoding, X_train: {dt}",
+    ids=_short_id,
 )
 def test_create_sample_weights_ValueError_when_weights_all_zeros(encoding, X_train):
     """
     Test sample_weights ValueError when the sum of the weights is zero.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 3,
                      encoding           = encoding,
                      transformer_series = StandardScaler(),
@@ -545,8 +542,8 @@ def test_create_sample_weights_ValueError_when_weights_all_zeros(encoding, X_tra
     forecaster.encoding_mapping_ = {"series_1": 0, "series_2": 1}
 
     err_msg = re.escape(
-        ("The resulting `weights` cannot be normalized because "
-         "the sum of the weights is zero.")
+        "The resulting `weights` cannot be normalized because "
+        "the sum of the weights is zero."
     )
     with pytest.raises(ValueError, match=err_msg):
         forecaster.create_sample_weights(

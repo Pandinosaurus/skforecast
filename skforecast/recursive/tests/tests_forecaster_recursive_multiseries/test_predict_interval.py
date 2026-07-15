@@ -2,10 +2,8 @@
 # ==============================================================================
 import re
 import pytest
-import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import MinMaxScaler
@@ -16,21 +14,20 @@ from lightgbm import LGBMRegressor
 from ....recursive import ForecasterRecursiveMultiSeries
 
 # Fixtures
-from .fixtures_forecaster_recursive_multiseries import series
-from .fixtures_forecaster_recursive_multiseries import exog
-from .fixtures_forecaster_recursive_multiseries import exog_predict
-from .fixtures_forecaster_recursive_multiseries import expected_df_to_long_format
+from .fixtures_forecaster_recursive_multiseries import (
+    series_dict_range,
+    series_dict_dt,
+    exog_long_dt,
+    exog_pred_long_dt,
+    series_dict_nans_train,
+    exog_dict_nans_train,
+    exog_dict_nans_test,
+    expected_df_to_long_format
+)
 
-THIS_DIR = Path(__file__).parent
-series_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series.joblib')
-exog_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series_exog.joblib')
-end_train = "2016-07-31 23:59:00"
-series_dict_train = {k: v.loc[:end_train,] for k, v in series_dict.items()}
-exog_dict_train = {k: v.loc[:end_train,] for k, v in exog_dict.items()}
-series_dict_test = {k: v.loc[end_train:,] for k, v in series_dict.items()}
-exog_dict_test = {k: v.loc[end_train:,] for k, v in exog_dict.items()}
-series_2 = pd.DataFrame({'1': pd.Series(np.arange(10)), 
-                         '2': pd.Series(np.arange(10))})
+series_2 = pd.DataFrame(
+    {'1': pd.Series(np.arange(10)), '2': pd.Series(np.arange(10))}
+).to_dict(orient='series')
 
 
 def test_check_interval_ValueError_when_method_is_not_valid_method():
@@ -50,8 +47,7 @@ def test_check_interval_ValueError_when_method_is_not_valid_method():
 
 @pytest.fixture(params=[('1', np.array([[10., 20., 20.]])), 
                         (['2'], np.array([[10., 30., 30.]])),
-                        (['1', '2'], np.array([[10., 20., 20., 10., 30., 30.]]))
-                        ],
+                        (['1', '2'], np.array([[10., 20., 20., 10., 30., 30.]]))],
                         ids=lambda d: f'levels: {d[0]}, preds: {d[1]}')
 def expected_pandas_dataframe(request):
     """
@@ -81,16 +77,21 @@ def expected_pandas_dataframe(request):
     return levels, expected_df
 
 
-def test_predict_output_when_regressor_is_LinearRegression_steps_is_1_in_sample_residuals_is_True_with_fixture(expected_pandas_dataframe):
+def test_predict_output_when_steps_is_1_in_sample_residuals_is_True_with_fixture(expected_pandas_dataframe):
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using in sample residuals. This test is equivalent to the next one.
     """
-    forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3,
-                                              transformer_series=None)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, transformer_series=None
+    )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
-    forecaster.in_sample_residuals_['1'] = np.full_like(forecaster.in_sample_residuals_['1'], fill_value=10)
-    forecaster.in_sample_residuals_['2'] = np.full_like(forecaster.in_sample_residuals_['2'], fill_value=20)
+    forecaster.in_sample_residuals_['1'] = np.full_like(
+        forecaster.in_sample_residuals_['1'], fill_value=10
+    )
+    forecaster.in_sample_residuals_['2'] = np.full_like(
+        forecaster.in_sample_residuals_['2'], fill_value=20
+    )
 
     predictions = forecaster.predict_interval(
         steps=1, levels=expected_pandas_dataframe[0], method='bootstrapping',
@@ -104,14 +105,17 @@ def test_predict_output_when_regressor_is_LinearRegression_steps_is_1_in_sample_
 
 def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_1_in_sample_residuals_is_True():
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using in sample residuals.
     """
-    forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3,
-                                              transformer_series=None)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, transformer_series=None
+    )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
 
-    forecaster.in_sample_residuals_['1'] = np.full_like(forecaster.in_sample_residuals_['1'], fill_value=10)
+    forecaster.in_sample_residuals_['1'] = np.full_like(
+        forecaster.in_sample_residuals_['1'], fill_value=10
+    )
     expected_1 = pd.DataFrame(
                     data = np.array([[10., 20., 20.]]),
                     columns = ['1', '1_lower_bound', '1_upper_bound'],
@@ -122,7 +126,9 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_1_
         use_in_sample_residuals=True, use_binned_residuals=False
     )
 
-    forecaster.in_sample_residuals_['2'] = np.full_like(forecaster.in_sample_residuals_['2'], fill_value=20)
+    forecaster.in_sample_residuals_['2'] = np.full_like(
+        forecaster.in_sample_residuals_['2'], fill_value=20
+    )
     expected_2 = pd.DataFrame(
                     data = np.array([[10., 30., 30.]]),
                     columns = ['2', '2_lower_bound', '2_upper_bound'],
@@ -188,16 +194,21 @@ def expected_pandas_dataframe_2(request):
     return levels, expected_df
 
 
-def test_predict_output_when_regressor_is_LinearRegression_steps_is_2_in_sample_residuals_is_True_with_fixture(expected_pandas_dataframe_2):
+def test_predict_output_when_steps_is_2_in_sample_residuals_is_True_with_fixture(expected_pandas_dataframe_2):
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using in sample residuals. This test is equivalent to the next one.
     """
-    forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3,
-                                              transformer_series=None)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, transformer_series=None
+    )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
-    forecaster.in_sample_residuals_['1'] = np.full_like(forecaster.in_sample_residuals_['1'], fill_value=10)
-    forecaster.in_sample_residuals_['2'] = np.full_like(forecaster.in_sample_residuals_['2'], fill_value=20)
+    forecaster.in_sample_residuals_['1'] = np.full_like(
+        forecaster.in_sample_residuals_['1'], fill_value=10
+    )
+    forecaster.in_sample_residuals_['2'] = np.full_like(
+        forecaster.in_sample_residuals_['2'], fill_value=20
+    )
 
     predictions = forecaster.predict_interval(
         steps=2, levels=expected_pandas_dataframe_2[0], method='bootstrapping', 
@@ -211,14 +222,17 @@ def test_predict_output_when_regressor_is_LinearRegression_steps_is_2_in_sample_
 
 def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_is_True():
     """
-    Test output when regressor is LinearRegression and two step ahead is predicted
+    Test output when estimator is LinearRegression and two step ahead is predicted
     using in sample residuals.
     """
-    forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3,
-                                              transformer_series=None)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, transformer_series=None
+    )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
 
-    forecaster.in_sample_residuals_['1'] = np.full_like(forecaster.in_sample_residuals_['1'], fill_value=10)
+    forecaster.in_sample_residuals_['1'] = np.full_like(
+        forecaster.in_sample_residuals_['1'], fill_value=10
+    )
     expected_1 = pd.DataFrame(
                     np.array([[10., 20.        , 20.],
                               [11., 24.33333333, 24.33333333]
@@ -231,7 +245,9 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_
         use_in_sample_residuals=True, use_binned_residuals=False
     )
 
-    forecaster.in_sample_residuals_['2'] = np.full_like(forecaster.in_sample_residuals_['2'], fill_value=20)
+    forecaster.in_sample_residuals_['2'] = np.full_like(
+        forecaster.in_sample_residuals_['2'], fill_value=20
+    )
     expected_2 = pd.DataFrame(
                     np.array([[10., 30.              , 30.],
                               [11., 37.66666666666667, 37.66666666666667]
@@ -264,13 +280,14 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_
     pd.testing.assert_frame_equal(results_3, expected[2])
 
 
-def test_predict_output_when_regressor_is_LinearRegression_steps_is_1_in_sample_residuals_is_False_with_fixture(expected_pandas_dataframe):
+def test_predict_output_when_steps_is_1_in_sample_residuals_is_False_with_fixture(expected_pandas_dataframe):
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using out sample residuals.
     """
-    forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3,
-                                              transformer_series=None)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, transformer_series=None
+    )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
     forecaster.out_sample_residuals_ = {
         '1': np.full_like(forecaster.in_sample_residuals_['1'], fill_value=10), 
@@ -288,13 +305,14 @@ def test_predict_output_when_regressor_is_LinearRegression_steps_is_1_in_sample_
     pd.testing.assert_frame_equal(predictions, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_steps_is_2_in_sample_residuals_is_False_with_fixture(expected_pandas_dataframe_2):
+def test_predict_output_when_steps_is_2_in_sample_residuals_is_False_with_fixture(expected_pandas_dataframe_2):
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using in sample residuals. This test is equivalent to the next one.
     """
-    forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3,
-                                              transformer_series=None)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, transformer_series=None
+    )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
     forecaster.out_sample_residuals_ = {
         '1': np.full_like(forecaster.in_sample_residuals_['1'], fill_value=10), 
@@ -311,21 +329,21 @@ def test_predict_output_when_regressor_is_LinearRegression_steps_is_2_in_sample_
 
 
 @pytest.mark.parametrize("interval", 
-                         [0.90, [5, 95], (5, 95)], 
+                         [0.90, [0.05, 0.95], (0.05, 0.95)], 
                          ids = lambda value: f'interval: {value}')
-def test_predict_interval_output_when_regressor_is_LinearRegression_with_transform_series(interval):
+def test_predict_interval_output_when_with_transform_series(interval):
     """
-    Test predict_interval output when using LinearRegression as regressor and StandardScaler.
+    Test predict_interval output when using LinearRegression as estimator and StandardScaler.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 5,
                      transformer_series = StandardScaler()
                  )
-    forecaster.fit(series=series, store_in_sample_residuals=False)
-    forecaster.set_in_sample_residuals(series=series)
+    forecaster.fit(series=series_dict_dt, store_in_sample_residuals=False)
+    forecaster.set_in_sample_residuals(series=series_dict_dt)
     predictions = forecaster.predict_interval(
-        steps=5, levels='1', method='bootstrapping', interval=interval,
+        steps=5, levels='l1', method='bootstrapping', interval=interval,
         use_in_sample_residuals=True, use_binned_residuals=False
     )
 
@@ -335,27 +353,30 @@ def test_predict_interval_output_when_regressor_is_LinearRegression_with_transfo
                                     [0.42176045, 0.03764527, 0.8287668 ],
                                     [0.48087237, 0.10818534, 0.90310365],
                                     [0.48268008, 0.15967278, 0.9054366 ]]),
-                   index = pd.RangeIndex(start=50, stop=55, step=1),
-                   columns = ['1', '1_lower_bound', '1_upper_bound']
+                   index = pd.date_range(start='2000-02-20', periods=5, freq='D'),
+                   columns = ['l1', 'l1_lower_bound', 'l1_upper_bound']
                )
     expected = expected_df_to_long_format(expected, method='interval')
     
     pd.testing.assert_frame_equal(predictions, expected)
 
 
-def test_predict_interval_output_when_regressor_is_LinearRegression_with_transform_series_as_dict():
+def test_predict_interval_output_when_with_transform_series_as_dict():
     """
-    Test predict_interval output when using LinearRegression as regressor and transformer_series
+    Test predict_interval output when using LinearRegression as estimator and transformer_series
     is a dict with 2 different transformers.
     """
+    transformer_series = {
+        'l1': StandardScaler(), 'l2': MinMaxScaler(), '_unknown_level': StandardScaler()
+    }
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 5,
-                     transformer_series = {'1': StandardScaler(), '2': MinMaxScaler(), '_unknown_level': StandardScaler()}
+                     transformer_series = transformer_series
                  )
-    forecaster.fit(series=series, store_in_sample_residuals=True)
+    forecaster.fit(series=series_dict_range, store_in_sample_residuals=True)
     predictions = forecaster.predict_interval(
-        steps=5, levels=['1'], method='bootstrapping', 
+        steps=5, levels=['l1'], method='bootstrapping', 
         use_in_sample_residuals=True, use_binned_residuals=False
     )
 
@@ -366,33 +387,35 @@ def test_predict_interval_output_when_regressor_is_LinearRegression_with_transfo
                                     [0.48522676, 0.07637607, 0.89258319],
                                     [0.47525733, 0.1192259 , 0.90741363]]),
                    index = pd.RangeIndex(start=50, stop=55, step=1),
-                   columns = ['1', '1_lower_bound', '1_upper_bound']
+                   columns = ['l1', 'l1_lower_bound', 'l1_upper_bound']
                )
     expected = expected_df_to_long_format(expected, method='interval')
     
     pd.testing.assert_frame_equal(predictions, expected)
 
 
-def test_predict_interval_output_when_regressor_is_LinearRegression_with_transform_series_and_transform_exog():
+def test_predict_interval_output_when_with_transform_series_and_transform_exog():
     """
-    Test predict_interval output when using LinearRegression as regressor, StandardScaler
+    Test predict_interval output when using LinearRegression as estimator, StandardScaler
     as transformer_series and transformer_exog as transformer_exog.
     """
     transformer_exog = ColumnTransformer(
-                            [('scale', StandardScaler(), ['exog_1']),
-                             ('onehot', OneHotEncoder(), ['exog_2'])],
-                            remainder = 'passthrough',
-                            verbose_feature_names_out = False
+                           [('scale', StandardScaler(), ['exog_1']),
+                            ('onehot', OneHotEncoder(), ['exog_2'])],
+                           remainder = 'passthrough',
+                           verbose_feature_names_out = False
                        )
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 5,
                      transformer_series = StandardScaler(),
                      transformer_exog   = transformer_exog,
                  )
-    forecaster.fit(series=series, exog=exog, store_in_sample_residuals=True)
+    forecaster.fit(
+        series=series_dict_dt, exog=exog_long_dt, store_in_sample_residuals=True
+    )
     results = forecaster.predict_interval(
-        steps=5, levels=['1', '2'], exog=exog_predict, method='bootstrapping', 
+        steps=5, levels=['l1', 'l2'], exog=exog_pred_long_dt, method='bootstrapping', 
         use_in_sample_residuals=True, use_binned_residuals=False
     )
     
@@ -404,8 +427,8 @@ def test_predict_interval_output_when_regressor_is_LinearRegression_with_transfo
                               [0.57391142, 0.18111008, 0.97045191, 0.65789846, 0.22574071, 1.02971185],
                               [0.54633594, 0.21019872, 0.96136894, 0.5841187 , 0.12771706, 0.94734674]]
                           ),
-                   index = pd.RangeIndex(start=50, stop=55, step=1),
-                   columns = ['1', '1_lower_bound', '1_upper_bound', '2', '2_lower_bound', '2_upper_bound']
+                   index = pd.date_range(start='2000-02-20', periods=5, freq='D'),
+                   columns = ['l1', 'l1_lower_bound', 'l1_upper_bound', 'l2', 'l2_lower_bound', 'l2_upper_bound']
                )
     expected = expected_df_to_long_format(expected, method='interval')
     
@@ -418,7 +441,7 @@ def test_predict_interval_output_when_series_and_exog_dict():
     exog are dictionaries.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=2, random_state=123, verbose=-1, max_depth=2
         ),
         lags=14,
@@ -428,13 +451,13 @@ def test_predict_interval_output_when_series_and_exog_dict():
         transformer_exog=StandardScaler(),
     )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=False, suppress_warnings=True
     )
-    forecaster.set_in_sample_residuals(series=series_dict_train, exog=exog_dict_train)
+    forecaster.set_in_sample_residuals(series=series_dict_nans_train, exog=exog_dict_nans_train)
     predictions = forecaster.predict_interval(
-        steps=5, exog=exog_dict_test, method='bootstrapping', 
-        interval=[5, 95], n_boot=10,  use_in_sample_residuals=True, 
+        steps=5, exog=exog_dict_nans_test, method='bootstrapping', 
+        interval=[0.05, 0.95], n_boot=10,  use_in_sample_residuals=True, 
         use_binned_residuals=False, suppress_warnings=True
     )
 
@@ -482,7 +505,7 @@ def test_predict_interval_output_when_series_and_exog_dict_unknown_level():
     exog are dictionaries and unknown_level.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -492,7 +515,7 @@ def test_predict_interval_output_when_series_and_exog_dict_unknown_level():
                      transformer_exog   = StandardScaler()
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -501,11 +524,11 @@ def test_predict_interval_output_when_series_and_exog_dict_unknown_level():
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster.predict_interval(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
-        method='bootstrapping', interval=[5, 95], n_boot=10, 
+        method='bootstrapping', interval=[0.05, 0.95], n_boot=10, 
         use_in_sample_residuals=True, use_binned_residuals=False, suppress_warnings=True
     )
 
@@ -561,7 +584,7 @@ def test_predict_interval_output_when_series_and_exog_dict_unknown_level_binned_
     exog are dictionaries, unknown_level and binned_residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -571,7 +594,7 @@ def test_predict_interval_output_when_series_and_exog_dict_unknown_level_binned_
                      transformer_exog   = StandardScaler()
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -580,11 +603,11 @@ def test_predict_interval_output_when_series_and_exog_dict_unknown_level_binned_
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster.predict_interval(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
-        method='bootstrapping', interval=[5, 95], n_boot=10, 
+        method='bootstrapping', interval=[0.05, 0.95], n_boot=10, 
         use_in_sample_residuals=True, use_binned_residuals=True, suppress_warnings=True
     )
 
@@ -739,7 +762,7 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
     exog are dictionaries, encoding is None and unknown_level.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -750,7 +773,7 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
                      differentiation    = 1
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -759,11 +782,11 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster.predict_interval(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
-        method='bootstrapping', interval=(5, 95), n_boot=10, 
+        method='bootstrapping', interval=(0.05, 0.95), n_boot=10, 
         use_in_sample_residuals=True, use_binned_residuals=False, suppress_warnings=True
     )
     
@@ -819,7 +842,7 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
     exog are dictionaries, encoding is None, unknown_level and binned_residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -830,7 +853,7 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
                      differentiation    = 1
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -839,11 +862,11 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster.predict_interval(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
-        method='bootstrapping', interval=(5, 95), n_boot=10, 
+        method='bootstrapping', interval=(0.05, 0.95), n_boot=10, 
         use_in_sample_residuals=True, use_binned_residuals=True, suppress_warnings=True
     )
 
@@ -993,7 +1016,7 @@ def test_predict_interval_output_when_series_and_exog_dict_encoding_None_unknown
 
 
 @pytest.mark.parametrize("interval", 
-                         [0.95, (2.5, 97.5)], 
+                         [0.95, (0.025, 0.975)], 
                          ids = lambda value: f'interval: {value}')
 def test_predict_interval_conformal_output_when_series_and_exog_dict(interval):
     """
@@ -1001,7 +1024,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict(interval):
     when series and exog are dictionaries.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=2, random_state=123, verbose=-1, max_depth=2
         ),
         lags=14,
@@ -1011,11 +1034,11 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict(interval):
         transformer_exog=StandardScaler(),
     )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
     results = forecaster.predict_interval(
-        steps=5, exog=exog_dict_test, interval=interval, method='conformal',
+        steps=5, exog=exog_dict_nans_test, interval=interval, method='conformal',
         use_in_sample_residuals=True, use_binned_residuals=False
     )
 

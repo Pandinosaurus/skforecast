@@ -2,38 +2,42 @@
 # ==============================================================================
 import re
 import pytest
-import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from lightgbm import LGBMRegressor
+from xgboost import XGBRegressor
+from catboost import CatBoostRegressor
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
+from sklearn.compose import make_column_transformer, make_column_selector
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
 from scipy.stats import norm
 
 from skforecast.exceptions import IgnoredArgumentWarning
+from skforecast.exceptions import MissingValuesWarning
 from skforecast.recursive import ForecasterRecursive
 from skforecast.recursive import ForecasterRecursiveMultiSeries
 from skforecast.direct import ForecasterDirectMultiVariate
-from skforecast.model_selection import backtesting_forecaster_multiseries
-from skforecast.model_selection._split import TimeSeriesFold
-from skforecast.preprocessing import RollingFeatures
+from skforecast.preprocessing import RollingFeatures, CalendarFeatures
+from skforecast.model_selection import TimeSeriesFold, backtesting_forecaster_multiseries
 
 # Fixtures
-from ..fixtures_model_selection_multiseries import series
-from ..fixtures_model_selection_multiseries import custom_metric
 from ....recursive.tests.tests_forecaster_recursive_multiseries.fixtures_forecaster_recursive_multiseries import expected_df_to_long_format
-THIS_DIR = Path(__file__).parent.parent
-series_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series.joblib')
-exog_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series_exog.joblib')
-end_train = "2016-07-31 23:59:00"
-series_dict_train = {k: v.loc[:end_train,] for k, v in series_dict.items()}
-exog_dict_train = {k: v.loc[:end_train,] for k, v in exog_dict.items()}
-series_dict_test = {k: v.loc[end_train:,] for k, v in series_dict.items()}
-exog_dict_test = {k: v.loc[end_train:,] for k, v in exog_dict.items()}
-series_with_nans = series.copy()
-series_with_nans.iloc[:10, series_with_nans.columns.get_loc('l2')] = np.nan
+from ..fixtures_model_selection_multiseries import (
+    series_wide_range,
+    series_wide_dt,
+    series_wide_dt_nans,
+    series_long_dt,
+    series_long_dt_nans,
+    series_dict_range,
+    series_dict_dt,
+    series_dict_nans,
+    exog_dict_nans,
+    series_dict_nans_train,
+    exog_dict_nans_train,
+    custom_metric
+)
 
 
 def test_backtesting_forecaster_multiseries_TypeError_when_forecaster_not_a_forecaster_multiseries():
@@ -43,7 +47,7 @@ def test_backtesting_forecaster_multiseries_TypeError_when_forecaster_not_a_fore
     'ForecasterRnn' or 'ForecasterDirectMultiVariate'.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     cv = TimeSeriesFold(
@@ -62,7 +66,7 @@ def test_backtesting_forecaster_multiseries_TypeError_when_forecaster_not_a_fore
     with pytest.raises(TypeError, match = err_msg):
         backtesting_forecaster_multiseries(
             forecaster            = forecaster,
-            series                = series,
+            series                = series_wide_range,
             cv                    = cv,
             levels                = 'l1',
             metric                = 'mean_absolute_error',
@@ -75,24 +79,23 @@ def test_backtesting_forecaster_multiseries_TypeError_when_forecaster_not_a_fore
 # ForecasterRecursiveMultiSeries
 # ======================================================================================================================
 @pytest.mark.parametrize("forecaster, n_jobs", 
-                         [(ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                         [(ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                           lags=2, transformer_series=None,
                                                           encoding='onehot'), -1),
-                          (ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                          (ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                           lags=2, transformer_series=None,
                                                           encoding='onehot'), 1),
-                          (ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                          (ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                           lags=2, transformer_series=None,
                                                           encoding='onehot'), 'auto')], 
                          ids=lambda fc: f'forecaster, n_jobs: {fc}')
-def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_not_refit_with_mocked(forecaster, n_jobs):
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_not_refit(forecaster, n_jobs):
     """
     Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries 
-    without refit with mocked 
-    (mocked done in Skforecast v0.5.0).
+    without refit with mocked (mocked done in Skforecast v0.5.0).
     """
     cv = TimeSeriesFold(
-            initial_train_size = len(series.iloc[:-12]),
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             refit              = False,
             fixed_train_size   = False
@@ -100,7 +103,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_dict_range,
                                                cv                    = cv,
                                                levels                = 'l1',
                                                metric                = 'mean_absolute_error',
@@ -119,7 +122,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                                0.49868447, 0.4859614 , 0.48480032])},
                                index=pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -133,12 +139,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     """
 
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor          = Ridge(random_state=123),
+        estimator          = Ridge(random_state=123),
         lags               = 2,
         transformer_series = None,
         encoding           = "onehot",
     )
-    forecaster.fit(series=series)
+    forecaster.fit(series=series_dict_range)
 
     cv = TimeSeriesFold(
             initial_train_size = None,
@@ -149,7 +155,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_dict_range,
                                                cv                    = cv,
                                                levels                = 'l1',
                                                metric                = mean_absolute_error,
@@ -173,20 +179,23 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                         0.50850968, 0.53127329, 0.49010354])},
         index=pd.RangeIndex(start=2, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', np.arange(0, 48))
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
 
 @pytest.mark.parametrize("forecaster, n_jobs", 
-                         [(ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                         [(ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                         lags=2, transformer_series=None,
                                                         encoding='onehot'), -1),
-                          (ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                          (ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                         lags=2, transformer_series=None,
                                                         encoding='onehot'), 1),
-                          (ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                          (ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                         lags=2, transformer_series=None,
                                                         encoding='onehot'), 'auto')], 
                          ids=lambda fc: f'forecaster, n_jobs: {fc}')
@@ -197,14 +206,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             refit              = True,
             fixed_train_size   = True
          )
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_dict_range,
                                                cv                    = cv,
                                                levels                = ['l1'],
                                                metric                = custom_metric,
@@ -223,20 +232,23 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                                0.48298309, 0.47778385, 0.47776533])},
                                index=pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
 
 @pytest.mark.parametrize("forecaster, n_jobs", 
-                         [(ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                         [(ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                         lags=2, transformer_series=None,
                                                         encoding='onehot'), -1),
-                          (ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                          (ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                         lags=2, transformer_series=None,
                                                         encoding='onehot'), 1),
-                          (ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), 
+                          (ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), 
                                                         lags=2, transformer_series=None,
                                                         encoding='onehot'), 'auto')], 
                          ids=lambda fc: f'forecaster, n_jobs: {fc}')
@@ -247,14 +259,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     """
 
     cv = TimeSeriesFold(
-                initial_train_size = len(series) - 12,
-                steps              = 3,
-                refit              = True,
-                fixed_train_size   = False
-            )
+            initial_train_size = len(series_dict_range['l1']) - 12,
+            steps              = 3,
+            refit              = True,
+            fixed_train_size   = False
+        )
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_dict_range,
                                                cv                    = cv,
                                                levels                = 'l1',
                                                metric                = 'mean_absolute_error',
@@ -273,23 +285,32 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                         0.4973047492523979, 0.4899104838474172, 0.4891085370228432])},
         index=pd.RangeIndex(start=38, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
 
-def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_refit_list_metrics_with_mocked_metrics():
+@pytest.mark.parametrize("series", 
+                         [series_wide_range, series_dict_range],
+                         ids = lambda series: f'series type: {type(series)}')
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_refit_list_metrics_with_mocked_metrics(series):
     """
     Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries 
     with refit and list of metrics with mocked and list of metrics 
     (mocked done in Skforecast v0.5.0).
     """
+    if isinstance(series, pd.DataFrame):
+        series = series.rename(columns={'1': 'l1', '2': 'l2'})
+    
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series['l1']) - 12,
             steps              = 3,
             refit              = True,
             fixed_train_size   = False
@@ -317,7 +338,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                         0.4973047492523979, 0.4899104838474172, 0.4891085370228432])},
         index=pd.RangeIndex(start=38, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -330,11 +354,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 5,
             refit              = False,
             fixed_train_size   = False
@@ -342,7 +366,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_dict_range,
                                                cv                    = cv,
                                                levels                = None,
                                                metric                = ['mean_absolute_error', mean_absolute_error],
@@ -365,7 +389,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                         0.52211914, 0.51092531])},
         index=pd.RangeIndex(start=38, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -378,11 +405,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 5,
             refit              = True,
             fixed_train_size   = False
@@ -390,7 +417,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_dict_range,
                                                cv                    = cv,
                                                levels                = None,
                                                metric                = ['mean_absolute_error', mean_absolute_error],
@@ -413,7 +440,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                         0.52555989, 0.51801796])},
         index=pd.RangeIndex(start=38, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -425,11 +455,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     without refit with mocked using exog and intervals (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             refit              = False,
             fixed_train_size   = False
@@ -437,13 +467,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_dict_range,
                                                cv                      = cv,
                                                levels                  = ['l1'],
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 500,
                                                random_state            = 123,
@@ -470,7 +500,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
                                index = pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -483,11 +516,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             refit              = True,
             fixed_train_size   = True
@@ -495,13 +528,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_dict_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 500,
                                                random_state            = 123,
@@ -528,7 +561,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
                                index = pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -541,11 +577,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_dict_range['l1']) - 20,
             steps              = 5,
             gap                = 3,
             refit              = False,
@@ -554,13 +590,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_dict_range,
                                                cv                      = cv,
-                                               levels                  = 'l1',
+                                               levels                  = None,
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -568,32 +604,235 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                                use_binned_residuals    = False,
                                                verbose                 = False
                                            )
-    
-    expected_metric = pd.DataFrame({'levels': ['l1'], 
-                                    'mean_absolute_error': [0.12454132173965098]})
+
+    expected_metric = pd.DataFrame(
+        {'levels': ['l1', 'l2'],
+         'mean_absolute_error': [0.12454132173965092, 0.27469835002689663]}
+    )
     expected_predictions = pd.DataFrame(
-                               data = np.array([[0.49730036, 0.28665807, 0.77661141],
-                                                [0.47420843, 0.26274039, 0.67160352],
-                                                [0.43537767, 0.14792273, 0.66812034],
-                                                [0.47436444, 0.26492951, 0.70721115],
-                                                [0.6336613 , 0.38057453, 0.86473426],
-                                                [0.6507444 , 0.44010211, 0.93005545],
-                                                [0.49896782, 0.28749977, 0.6963629 ],
-                                                [0.54030017, 0.25284522, 0.77304283],
-                                                [0.36847564, 0.15904071, 0.60132235],
-                                                [0.43668441, 0.18359764, 0.66775737],
-                                                [0.47126095, 0.26061865, 0.750572  ],
-                                                [0.62443149, 0.41296345, 0.82182658],
-                                                [0.41464206, 0.12718711, 0.64738472],
-                                                [0.49248163, 0.2830467 , 0.72532833],
-                                                [0.66520692, 0.41212014, 0.89627988],
-                                                [0.50609184, 0.29544954, 0.78540288],
-                                                [0.53642897, 0.32496092, 0.73382405]]),
-                               columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-                               index = pd.RangeIndex(start=33, stop=50, step=1)
-                           )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
-                                   
+        data={
+            "level": [
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+                "l1",
+                "l2",
+            ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                3,
+                3,
+                3,
+                3,
+            ],
+            "pred": [
+                0.49730036243537784,
+                0.4998402577520187,
+                0.47420842953795883,
+                0.47674469563507416,
+                0.4353776720245559,
+                0.4379138356939922,
+                0.4743644399072573,
+                0.4769006315978118,
+                0.6336613001675475,
+                0.6361974926695857,
+                0.6507444028348909,
+                0.6533103400863456,
+                0.4989678150521124,
+                0.5015041166715075,
+                0.5403001666320686,
+                0.542836128765268,
+                0.3684756420744971,
+                0.3710118333555373,
+                0.43668441377416667,
+                0.43922060783578604,
+                0.4712609487756162,
+                0.4737907296720655,
+                0.624431491108326,
+                0.6269679682275641,
+                0.41464205849840485,
+                0.41717830059257244,
+                0.49248162880625845,
+                0.49501781891590835,
+                0.665206915274275,
+                0.6677431071682638,
+                0.5060918367467624,
+                0.5086115456199943,
+                0.5364289684440446,
+                0.5389649676269659,
+            ],
+            "lower_bound": [
+                0.28665806709134994,
+                0.0016639673904948753,
+                0.2627403857990317,
+                -0.08198462790327045,
+                0.14792272535427037,
+                -0.01721379281157473,
+                0.26492951126379966,
+                -0.022945795607171405,
+                0.38057452866433383,
+                0.18163384112960576,
+                0.4401021074908629,
+                0.15513404972482184,
+                0.28749977131318527,
+                -0.05722520686683701,
+                0.252845219961783,
+                0.08770850025970103,
+                0.15904071343103957,
+                -0.12883459384944596,
+                0.1835976422709529,
+                -0.015343043704193848,
+                0.26061865343158824,
+                -0.024385560689458324,
+                0.41296344736939894,
+                0.06823864468921947,
+                0.12718711182811931,
+                -0.03794932791299452,
+                0.2830467001628009,
+                -0.004828608289074926,
+                0.4121201437710612,
+                0.21317945562828403,
+                0.29544954140273444,
+                0.05191842245524596,
+                0.3249609247051175,
+                0.04175542357060692,
+            ],
+            "upper_bound": [
+                0.7766114097999868,
+                0.873459347707239,
+                0.6716035154929846,
+                0.8474974824443811,
+                0.6681203376544204,
+                0.8137785233427846,
+                0.7072111453567272,
+                0.8549721590887374,
+                0.8647342609948074,
+                1.0110735673917544,
+                0.9300554501994998,
+                1.026929430041566,
+                0.6963629010071382,
+                0.8722569034808145,
+                0.773042832261933,
+                0.9187008164140603,
+                0.6013223475239671,
+                0.7490833608464628,
+                0.6677573746014266,
+                0.8140966825579546,
+                0.7505719961402251,
+                0.8474098196272858,
+                0.8218265770633518,
+                0.997720755036871,
+                0.6473847241282694,
+                0.7930429882413648,
+                0.7253283342557284,
+                0.8730893464068338,
+                0.8962798761015348,
+                1.0426191818904327,
+                0.7854028841113713,
+                0.8861773289228698,
+                0.7338240543990704,
+                0.9178744245002909,
+            ],
+        },
+        columns=["level", "fold", "pred", "lower_bound", "upper_bound"],
+        index=pd.Index(
+            [
+                33,
+                33,
+                34,
+                34,
+                35,
+                35,
+                36,
+                36,
+                37,
+                37,
+                38,
+                38,
+                39,
+                39,
+                40,
+                40,
+                41,
+                41,
+                42,
+                42,
+                43,
+                43,
+                44,
+                44,
+                45,
+                45,
+                46,
+                46,
+                47,
+                47,
+                48,
+                48,
+                49,
+                49,
+            ]
+        ),
+    )
+
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
@@ -605,11 +844,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_dict_range['l1']) - 20,
             steps              = 5,
             gap                = 3,
             refit              = True,
@@ -619,13 +858,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_dict_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -655,7 +894,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
                                index = pd.RangeIndex(start=33, stop=48, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -668,13 +910,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
-    series_datetime = series.copy()
-    series_datetime.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_long_dt.loc['l1']) - 20,
             steps              = 5,
             gap                = 5,
             refit              = True,
@@ -684,13 +924,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_datetime,
+                                               series                  = series_long_dt,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series_datetime['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_dt['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -718,9 +958,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                          [0.49407875, 0.20961775, 0.79262603],
                          [0.51234652, 0.28959935, 0.77646864]]),
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-        index = pd.date_range(start='2022-02-05', periods=15, freq='D')
+        index = pd.date_range(start='2020-02-05', periods=15, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -733,10 +976,17 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     with different lengths (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
+
+    exog_long_dt = series_wide_dt['l1'].copy().rename('exog_1').to_frame()
+    exog_long_dt.index.name = "datetime"
+    exog_long_dt = [exog_long_dt.assign(series_id=f"l{i}") for i in range(1, 3)]
+    exog_long_dt = pd.concat(exog_long_dt)
+    exog_long_dt = exog_long_dt.set_index(["series_id", exog_long_dt.index])
+
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_long_dt.loc['l1']) - 20,
             steps              = 5,
             gap                = 3,
             refit              = False,
@@ -746,13 +996,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_with_nans,
+                                               series                  = series_long_dt_nans,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series_with_nans['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = exog_long_dt,
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -782,9 +1032,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                         [0.49290276, 0.29093545, 0.74099356],
                         [0.54653561, 0.3301151 , 0.72669998]]),
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-        index = pd.RangeIndex(start=33, stop=50, step=1)
+        index = pd.date_range(start='2020-02-03', periods=17, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -797,10 +1050,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
+    exog_wide_dt_nans = series_wide_dt_nans['l1'].copy().rename('exog_1')
+
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_long_dt.loc['l1']) - 20,
             steps              = 5,
             gap                = 3,
             refit              = True,
@@ -810,13 +1065,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_with_nans,
+                                               series                  = series_long_dt_nans,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series_with_nans['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = exog_wide_dt_nans,
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -844,9 +1099,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                                                 [0.48437311, 0.21791903, 0.74775272],
                                                 [0.67731074, 0.40792678, 0.94040138]]),
                                columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-                               index = pd.RangeIndex(start=33, stop=48, step=1)
+                               index = pd.date_range(start='2020-02-03', periods=15, freq='D')
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -859,13 +1117,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
+    exog_wide_dt_nans = series_wide_dt_nans['l1'].copy().rename('exog_1')
 
-    series_with_nans_datetime = series_with_nans.copy()
-    series_with_nans_datetime.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_long_dt.loc['l1']) - 20,
             steps              = 5,
             gap                = 5,
             refit              = True,
@@ -875,13 +1132,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_with_nans_datetime,
+                                               series                  = series_long_dt_nans,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series_with_nans_datetime['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = exog_wide_dt_nans,
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -909,9 +1166,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                          [0.49407875, 0.20961775, 0.79262603],
                          [0.51234652, 0.28959935, 0.77646864]]),
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-        index = pd.date_range(start='2022-02-05', periods=15, freq='D')
+        index = pd.date_range(start='2020-02-05', periods=15, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -924,11 +1184,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.9.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_dict_range['l1']) - 20,
             steps              = 2,
             gap                = 0,
             refit              = 2,
@@ -938,13 +1198,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_dict_range,
                                                cv                      = cv,
                                                levels                  = None,
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -1001,14 +1261,19 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound', 'l2', 'l2_lower_bound', 'l2_upper_bound'],
         index = pd.RangeIndex(start=30, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [
+        0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9
+    ])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
 
 @pytest.mark.parametrize("initial_train_size", 
-                         [len(series) - 20, "2022-01-30 00:00:00"],
+                         [len(series_dict_dt['l1']) - 20, "2020-01-30 00:00:00"],
                          ids=lambda init: f'initial_train_size: {init}')
 def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_refit_int_interval_yes_exog_not_allow_remainder_gap_with_mocked(initial_train_size):
     """
@@ -1017,13 +1282,9 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.9.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
-    series_with_index = series.copy()
-    series_with_index.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
-    exog_with_index = series['l1'].rename('exog_1').copy()
-    exog_with_index.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
     cv = TimeSeriesFold(
             initial_train_size = initial_train_size,
             steps              = 4,
@@ -1035,13 +1296,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_with_index,
+                                               series                  = series_dict_dt,
                                                cv                      = cv,
                                                levels                  = ['l2'],
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = exog_with_index,
-                                               interval                = [5, 95],
+                                               exog                    = series_dict_dt['l1'].rename('exog_1').copy(),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 100,
                                                random_state            = 123,
@@ -1072,9 +1333,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                          [0.66342359,  0.09678738, 1.08072056],
                          [0.53547991, -0.00707326, 1.06275125]]),
         columns = ['l2', 'l2_lower_bound', 'l2_upper_bound'],
-        index = pd.date_range(start='2022-02-03', periods=16, freq='D')
+        index = pd.date_range(start='2020-02-03', periods=16, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -1086,7 +1350,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     when series and exog are dictionaries (mocked done in Skforecast v0.12.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=2, random_state=123, verbose=-1, max_depth=2
         ),
         lags=14,
@@ -1096,7 +1360,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         transformer_exog=StandardScaler(),
     )
     cv = TimeSeriesFold(
-             initial_train_size    = len(series_dict_train['id_1000']),
+             initial_train_size    = len(series_dict_nans_train['id_1000']),
              steps                 = 24,
              refit                 = False,
              fixed_train_size      = True,
@@ -1105,8 +1369,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster            = forecaster,
-        series                = series_dict,
-        exog                  = exog_dict,
+        series                = series_dict_nans,
+        exog                  = exog_dict_nans,
         cv                    = cv,
         metric                = 'mean_absolute_error',
         add_aggregated_metric = False,
@@ -1126,44 +1390,51 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
     expected_predictions = pd.DataFrame(
         data=np.array([
-        [1438.14154717, 2090.79352613, 2166.9832933 , 7285.52781428],
-        [1438.14154717, 2089.11038884, 2074.55994929, 7488.18398744],
-        [1438.14154717, 2089.11038884, 2035.99448247, 7488.18398744],
-        [1403.93625654, 2089.11038884, 2035.99448247, 7488.18398744],
-        [1403.93625654, 2089.11038884, 2035.99448247, 7488.18398744],
-        [1403.93625654, 2076.10228838, 2035.99448247, 7250.69119259],
-        [1403.93625654, 2076.10228838,        np.nan, 7085.32315355],
-        [1403.93625654, 2000.42985714,        np.nan, 7285.52781428],
-        [1403.93625654, 2013.4379576 ,        np.nan, 7285.52781428],
-        [1403.93625654, 2013.4379576 ,        np.nan, 7285.52781428]]),
+            [1438.14154717, 2090.79352613, 2166.9832933 , 7285.52781428],
+            [1438.14154717, 2089.11038884, 2074.55994929, 7488.18398744],
+            [1438.14154717, 2089.11038884, 2035.99448247, 7488.18398744],
+            [1403.93625654, 2089.11038884, 2035.99448247, 7488.18398744],
+            [1403.93625654, 2089.11038884, 2035.99448247, 7488.18398744],
+            [1403.93625654, 2076.10228838, 2035.99448247, 7250.69119259],
+            [1403.93625654, 2076.10228838,        np.nan, 7085.32315355],
+            [1403.93625654, 2000.42985714,        np.nan, 7285.52781428],
+            [1403.93625654, 2013.4379576 ,        np.nan, 7285.52781428],
+            [1403.93625654, 2013.4379576 ,        np.nan, 7285.52781428]
+        ]),
         index=pd.date_range('2016-08-01', periods=10, freq='D'),
         columns=['id_1000', 'id_1001', 'id_1003', 'id_1004']
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0] * 10)
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
     pd.testing.assert_frame_equal(predictions.head(40), expected_predictions)
 
 
 @pytest.mark.parametrize("initial_train_size", 
-                         [len(series_dict_train['id_1000']), "2016-07-31 00:00:00"],
+                         [len(series_dict_nans_train['id_1000']), "2016-07-31 00:00:00"],
                          ids=lambda init: f'initial_train_size: {init}')
 def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_series_and_exog_dict_with_window_features(initial_train_size):
     """
     Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries 
     when series and exog are dictionaries and window features
-    (mocked done in Skforecast v0.14.0).
+    (mocked done in Skforecast v0.23.0).
     """
+    
+    calendar_features = CalendarFeatures(features=None, encoding='cyclical')
     window_features = RollingFeatures(
         stats = ['mean', 'std', 'min', 'max', 'sum', 'median', 'ratio_min_max', 'coef_variation'],
         window_sizes = 10,
     )
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=20, random_state=123, verbose=-1
         ),
         lags=14,
         window_features=window_features,
+        calendar_features=calendar_features,
         encoding='ordinal',
         dropna_from_series=False,
         transformer_series=StandardScaler(),
@@ -1179,8 +1450,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster            = forecaster,
-        series                = series_dict,
-        exog                  = exog_dict,
+        series                = series_dict_nans,
+        exog                  = exog_dict_nans,
         cv                    = cv,
         metric                = 'mean_absolute_error',
         add_aggregated_metric = False,
@@ -1193,27 +1464,31 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     expected_metrics = pd.DataFrame(
         data={
         'levels': ['id_1000', 'id_1001', 'id_1002', 'id_1003', 'id_1004'],
-        'mean_absolute_error': [203.9468527, 1105.40996716,
-                                np.nan, 253.89651216, 792.72364223]
+        'mean_absolute_error': [199.81518280310684, 1115.045969563983,
+                                np.nan, 217.6768703087386, 803.3045534793897]
         },
         columns=['levels', 'mean_absolute_error']
     )
     expected_predictions = pd.DataFrame(
         data=np.array([
-        [1298.57461037, 2667.47526192, 2542.97100542, 8411.2157276 ],
-        [1304.25805669, 2487.352452  , 2229.55427308, 8500.56915202],
-        [1344.1446645 , 2636.37058144, 2199.05843636, 8440.88224657],
-        [1379.38364674, 2544.32608586, 2236.41755734, 8116.99208078],
-        [1338.09366426, 2314.51247115, 2187.52526646, 8190.43433684],
-        [1151.17626597, 1901.63671417, 2181.09966124, 6262.31416544],
-        [ 948.94468539, 1683.47114395,        np.nan, 5937.21928644],
-        [1348.71328768, 1948.01948249,        np.nan, 8391.00440651],
-        [1384.41932734, 2515.20885091,        np.nan, 8542.34427233],
-        [1402.03041386, 2542.16541225,        np.nan, 8359.17989861]]),
+            [1367.8168521005518, 2659.7354202594715, 2600.055784615881 , 8287.791231177616],
+            [1385.9249194892398, 2572.9304230008293, 2227.4825929716308, 8613.246933061315],
+            [1344.7592902188328, 2481.6319457427626, 2238.68774401883  , 8454.948871321445],
+            [1355.109921462606 , 2474.5804565731837, 2215.0999465585646, 8223.438440073753],
+            [1302.545458685161 , 2223.5689259238375, 2261.4155670366285, 8296.11982882222 ],
+            [1109.0701788829365, 1810.9460932226655, 2034.3104117399525, 6500.071443237832],
+            [ 967.4810834133982, 1726.4654031028913,             np.nan, 5913.027059523128],
+            [1271.2067830112017, 1836.15693661717  ,             np.nan, 8016.960370920512],
+            [1350.672861399203 , 2262.059553163019 ,             np.nan, 8711.415912895141],
+            [1351.2038198214527, 2342.99402742723  ,             np.nan, 8651.787902986322]
+        ]),
         index=pd.date_range('2016-08-01', periods=10, freq='D'),
         columns=['id_1000', 'id_1001', 'id_1003', 'id_1004']
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0] * 10)
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
     pd.testing.assert_frame_equal(predictions.head(40), expected_predictions)
@@ -1225,11 +1500,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     with no refit, remainder, multiple levels and add_aggregated_metric.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None, encoding='onehot'
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series) - 12,
+             initial_train_size = len(series_dict_range['l1']) - 12,
              steps              = 5,
              refit              = False,
              fixed_train_size   = False,
@@ -1237,7 +1512,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
     metrics, backtest_predictions = backtesting_forecaster_multiseries(
                                         forecaster            = forecaster,
-                                        series                = series,
+                                        series                = series_dict_range,
                                         cv                    = cv,
                                         levels                = None,
                                         metric                = ['mean_absolute_error', 'mean_absolute_scaled_error'],
@@ -1298,7 +1573,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         },
         index=pd.RangeIndex(start=38, stop=50, step=1),
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(expected_metrics, metrics)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -1311,7 +1589,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.12.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=2, random_state=123, verbose=-1, max_depth=2
         ),
         lags=14,
@@ -1321,7 +1599,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         transformer_exog=StandardScaler(),
     )
     cv = TimeSeriesFold(
-            initial_train_size = len(series_dict_train['id_1000']),
+            initial_train_size = len(series_dict_nans_train['id_1000']),
             steps              = 24,
             refit              = False,
             fixed_train_size   = True,
@@ -1329,8 +1607,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster            = forecaster,
-        series                = series_dict,
-        exog                  = exog_dict,
+        series                = series_dict_nans,
+        exog                  = exog_dict_nans,
         cv                    = cv,
         metric                = ['mean_absolute_error', 'mean_squared_error'],
         add_aggregated_metric = True,
@@ -1381,7 +1659,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         columns=['id_1000', 'id_1001', 'id_1003', 'id_1004'],
         index=pd.date_range('2016-08-01', periods=10, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0] * 10)
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
     pd.testing.assert_frame_equal(predictions.head(40), expected_predictions)
@@ -1393,7 +1674,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     when series and exog are dictionaries (mocked done in Skforecast v0.12.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=2, random_state=123, verbose=-1, max_depth=2
         ),
         lags=14,
@@ -1403,7 +1684,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         transformer_exog=StandardScaler(),
     )
     cv = TimeSeriesFold(
-            initial_train_size = len(series_dict_train['id_1000']),
+            initial_train_size = len(series_dict_nans_train['id_1000']),
             steps              = 5,
             refit              = False,
             fixed_train_size   = True,
@@ -1413,8 +1694,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster        = forecaster,
-        series            = series_dict,
-        exog              = exog_dict,
+        series            = series_dict_nans,
+        exog              = exog_dict_nans,
         cv                = cv,
         metric            = 'mean_absolute_error',
         n_jobs            = 'auto',
@@ -1452,7 +1733,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 dtype='datetime64[ns]', freq=None),
         columns=['id_1000', 'id_1001', 'id_1003', 'id_1004']
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
     pd.testing.assert_frame_equal(predictions.head(40), expected_predictions)
@@ -1465,7 +1749,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.13.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -1477,7 +1761,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
     
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False,
              fixed_train_size   = True,
@@ -1487,8 +1771,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster        = forecaster,
-        series            = series_dict,
-        exog              = exog_dict,
+        series            = series_dict_nans,
+        exog              = exog_dict_nans,
         cv                = cv,
         metric            = ['mean_absolute_error', 'mean_absolute_scaled_error'],
         n_jobs            = 'auto',
@@ -1528,7 +1812,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         index=pd.date_range('2016-08-01', periods=10, freq='D'),
         columns=['id_1000', 'id_1001', 'id_1003', 'id_1004']
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0] * 10)
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
     pd.testing.assert_frame_equal(predictions.head(40), expected_predictions)
@@ -1545,7 +1832,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     }
 
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -1557,7 +1844,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False,
              fixed_train_size   = True,
@@ -1567,8 +1854,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster        = forecaster,
-        series            = series_dict,
-        exog              = exog_dict,
+        series            = series_dict_nans,
+        exog              = exog_dict_nans,
         cv                = cv,
         metric            = ['mean_absolute_error', 'mean_absolute_scaled_error'],
         n_jobs            = 'auto',
@@ -1626,7 +1913,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         index=pd.date_range('2016-08-01', periods=10, freq='D'),
         columns=['id_1000', 'id_1001', 'id_1003', 'id_1004']
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0] * 10)
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
     pd.testing.assert_frame_equal(predictions.head(40), expected_predictions)
@@ -1639,7 +1929,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     bootstrapping iterations (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -1650,15 +1940,15 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False
          )
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster              = forecaster,
-        series                  = series_dict,
-        exog                    = exog_dict,
+        series                  = series_dict_nans,
+        exog                    = exog_dict_nans,
         cv                      = cv,
         metric                  = ['mean_absolute_error', 'mean_absolute_scaled_error'],
         interval                = "bootstrapping",
@@ -1719,6 +2009,18 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 "id_1004",
                 "id_1000",
                 "id_1001",
+            ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
             ],
             "pred": [
                 1559.6918278739745,
@@ -1809,8 +2111,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
             dtype="datetime64[ns]",
             freq=None,
         ),
-        columns=['level', 'pred', 'pred_boot_0', 'pred_boot_1', 'pred_boot_2',
-                 'pred_boot_3', 'pred_boot_4'],
+        columns=['level', 'fold', 'pred', 'pred_boot_0', 'pred_boot_1', 
+                 'pred_boot_2', 'pred_boot_3', 'pred_boot_4'],
     )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
@@ -1824,7 +2126,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -1835,18 +2137,18 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False
          )
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster              = forecaster,
-        series                  = series_dict,
-        exog                    = exog_dict,
+        series                  = series_dict_nans,
+        exog                    = exog_dict_nans,
         cv                      = cv,
         metric                  = ['mean_absolute_error', 'mean_absolute_scaled_error'],
-        interval                = [10, 50, 90],
+        interval                = [0.1, 0.5, 0.9],
         interval_method         = "bootstrapping",
         n_boot                  = 25,
         use_in_sample_residuals = True,
@@ -1905,6 +2207,18 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 "id_1000",
                 "id_1001",
             ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+            ],
             "pred": [
                 1559.6918278739745,
                 2934.363291873329,
@@ -1917,7 +2231,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 1537.6749468304602,
                 3354.2752034001587,
             ],
-            "p_10": [
+            "q_0.1": [
                 1254.3937600463285,
                 2250.0470173812155,
                 2985.320707618097,
@@ -1929,7 +2243,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 1366.3621900495914,
                 1932.690821216753,
             ],
-            "p_50": [
+            "q_0.5": [
                 1467.3747504982232,
                 2677.246109137839,
                 3329.152734925742,
@@ -1941,7 +2255,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 1456.154435701382,
                 2669.958928908045,
             ],
-            "p_90": [
+            "q_0.9": [
                 1662.1929830180393,
                 3379.480213187932,
                 3507.050519419739,
@@ -1969,8 +2283,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
             ],
             dtype="datetime64[ns]",
             freq=None,
-        ),
-        columns=["level", "pred", "p_10", "p_50", "p_90"],
+        )
     )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
@@ -1984,7 +2297,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     scipy.stats norm distribution. (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -1995,15 +2308,15 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False
          )
     
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster              = forecaster,
-        series                  = series_dict,
-        exog                    = exog_dict,
+        series                  = series_dict_nans,
+        exog                    = exog_dict_nans,
         cv                      = cv,
         metric                  = ['mean_absolute_error', 'mean_absolute_scaled_error'],
         interval                = norm,
@@ -2065,6 +2378,18 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 "id_1000",
                 "id_1001",
             ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+            ],
             "pred": [
                 1559.6918278739745,
                 2934.363291873329,
@@ -2117,8 +2442,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
             ],
             dtype="datetime64[ns]",
             freq=None,
-        ),
-        columns=["level", "pred", "loc", "scale"],
+        )
     )
 
     pd.testing.assert_frame_equal(metrics, expected_metrics)
@@ -2126,7 +2450,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
 
 
 @pytest.mark.parametrize("interval", 
-                         [0.90, (5, 95)], 
+                         [0.90, (0.05, 0.95)], 
                          ids = lambda value: f'interval: {value}')
 def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_series_and_exog_dict_interval_conformal(interval):
     """
@@ -2135,7 +2459,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     conformal with binned residuals (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -2146,15 +2470,15 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False
          )
 
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster              = forecaster,
-        series                  = series_dict,
-        exog                    = exog_dict,
+        series                  = series_dict_nans,
+        exog                    = exog_dict_nans,
         cv                      = cv,
         metric                  = ['mean_absolute_error', 'mean_absolute_scaled_error'],
         interval                = interval,
@@ -2215,6 +2539,18 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
                 "id_1000",
                 "id_1001",
             ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+            ],
             "pred": [
                 1559.6918278739745,
                 2934.363291873329,
@@ -2274,6 +2610,166 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     pd.testing.assert_frame_equal(predictions.head(10), expected_predictions)
 
 
+# ******************************************************************************
+# * Out sample residuals                                                       *
+# ******************************************************************************
+
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_out_sample_residuals_not_binned_with_mocked():
+    """
+    Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries
+    with refit, out of sample residuals and use_binned_residuals=False.
+    Out sample residuals are set using set_out_sample_residuals method.
+    """
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None,
+        encoding='onehot', binner_kwargs={'n_bins': 10}
+    )
+    forecaster.fit(series=series_dict_range)
+
+    rng = np.random.default_rng(42)
+    n_residuals = 50
+    y_pred_dict = {}
+    y_true_dict = {}
+    for level in ['l1', 'l2']:
+        y_pred_level = rng.uniform(0.2, 0.8, size=n_residuals)
+        residuals = rng.uniform(-0.3, 0.5, size=n_residuals)
+        y_true_level = y_pred_level + residuals
+        y_pred_dict[level] = y_pred_level
+        y_true_dict[level] = y_true_level
+    forecaster.set_out_sample_residuals(
+        y_true=y_true_dict, y_pred=y_pred_dict
+    )
+
+    cv = TimeSeriesFold(
+            initial_train_size = len(series_dict_range['l1']) - 12,
+            steps              = 4,
+            refit              = True,
+        )
+
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster              = forecaster,
+                                               series                  = series_dict_range,
+                                               cv                      = cv,
+                                               levels                  = 'l1',
+                                               metric                  = 'mean_absolute_error',
+                                               add_aggregated_metric   = False,
+                                               interval                = [0.05, 0.95],
+                                               interval_method         = 'bootstrapping',
+                                               n_boot                  = 500,
+                                               random_state            = 123,
+                                               use_in_sample_residuals = False,
+                                               use_binned_residuals    = False,
+                                               n_jobs                  = 1,
+                                               verbose                 = False,
+                                               show_progress           = False,
+                                               suppress_warnings       = True
+                                           )
+
+    expected_metric = pd.DataFrame({'levels': ['l1'],
+                                    'mean_absolute_error': [0.2126428594686577]})
+    expected_predictions = pd.DataFrame(
+                               data = np.array([[0.4978839 , 0.22253806, 0.84910042],
+                                                [0.46288427, 0.19593158, 0.81468311],
+                                                [0.48433446, 0.21235808, 0.82532489],
+                                                [0.48677605, 0.22005107, 0.84833058],
+                                                [0.46487551, 0.18953084, 0.81609259],
+                                                [0.49811831, 0.24363003, 0.85274362],
+                                                [0.49368425, 0.22772781, 0.84426077],
+                                                [0.49274964, 0.22870535, 0.86093179],
+                                                [0.46698305, 0.19163672, 0.81819988],
+                                                [0.47580279, 0.20710006, 0.82748006],
+                                                [0.47419019, 0.19750013, 0.81120622],
+                                                [0.47409035, 0.20106148, 0.83044522]]),
+                               columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
+                               index = pd.RangeIndex(start=38, stop=50, step=1)
+                           )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_out_sample_residuals_binned_with_mocked():
+    """
+    Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries
+    with refit, out of sample residuals and use_binned_residuals=True.
+    Out sample residuals are set using set_out_sample_residuals method.
+    """
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=Ridge(random_state=123), lags=2, transformer_series=None,
+        encoding='onehot', binner_kwargs={'n_bins': 10}
+    )
+    forecaster.fit(series=series_dict_range)
+
+    rng = np.random.default_rng(42)
+    n_residuals = 50
+    y_pred_dict = {}
+    y_true_dict = {}
+    for level in ['l1', 'l2']:
+        y_pred_level = rng.uniform(0.2, 0.8, size=n_residuals)
+        residuals = rng.uniform(-0.3, 0.5, size=n_residuals)
+        y_true_level = y_pred_level + residuals
+        y_pred_dict[level] = y_pred_level
+        y_true_dict[level] = y_true_level
+    forecaster.set_out_sample_residuals(
+        y_true=y_true_dict, y_pred=y_pred_dict
+    )
+
+    cv = TimeSeriesFold(
+            initial_train_size = len(series_dict_range['l1']) - 12,
+            steps              = 4,
+            refit              = True,
+        )
+
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster              = forecaster,
+                                               series                  = series_dict_range,
+                                               cv                      = cv,
+                                               levels                  = 'l1',
+                                               metric                  = 'mean_absolute_error',
+                                               add_aggregated_metric   = False,
+                                               interval                = [0.05, 0.95],
+                                               interval_method         = 'bootstrapping',
+                                               n_boot                  = 500,
+                                               random_state            = 123,
+                                               use_in_sample_residuals = False,
+                                               use_binned_residuals    = True,
+                                               n_jobs                  = 1,
+                                               verbose                 = False,
+                                               show_progress           = False,
+                                               suppress_warnings       = True
+                                           )
+
+    expected_metric = pd.DataFrame({'levels': ['l1'],
+                                    'mean_absolute_error': [0.2126428594686577]})
+    expected_predictions = pd.DataFrame(
+                               data = np.array([[0.4978839 , 0.22253806, 0.84910042],
+                                                [0.46288427, 0.17849192, 0.81637876],
+                                                [0.48433446, 0.21116082, 0.82945134],
+                                                [0.48677605, 0.22658078, 0.84471227],
+                                                [0.46487551, 0.17076599, 0.81609259],
+                                                [0.49811831, 0.25457065, 0.84432249],
+                                                [0.49368425, 0.24465891, 0.84667583],
+                                                [0.49274964, 0.24345334, 0.83979343],
+                                                [0.46698305, 0.17287266, 0.81819988],
+                                                [0.47580279, 0.24133499, 0.81025753],
+                                                [0.47419019, 0.21802026, 0.80880852],
+                                                [0.47409035, 0.22581373, 0.82548058]]),
+                               columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
+                               index = pd.RangeIndex(start=38, stop=50, step=1)
+                           )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
 def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_return_predictors_same_predictions_as_predict():
     """
     Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries 
@@ -2282,7 +2778,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     predict method.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=30, random_state=123, verbose=-1, max_depth=4
         ),
         lags=[1, 7, 14],
@@ -2293,15 +2789,15 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
     )
 
     cv = TimeSeriesFold(
-             initial_train_size = len(series_dict_train['id_1000']),
+             initial_train_size = len(series_dict_nans_train['id_1000']),
              steps              = 24,
              refit              = False
          )
 
     metrics, predictions = backtesting_forecaster_multiseries(
         forecaster        = forecaster,
-        series            = series_dict,
-        exog              = exog_dict,
+        series            = series_dict_nans,
+        exog              = exog_dict_nans,
         cv                = cv,
         metric            = ['mean_absolute_error', 'mean_absolute_scaled_error'],
         return_predictors = True,
@@ -2346,8 +2842,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         }
     )
 
-    forecaster.fit(series=series_dict_train, exog=exog_dict_train)
-    expected_predictions = forecaster.regressor.predict(
+    forecaster.fit(series=series_dict_nans_train, exog=exog_dict_nans_train)
+    expected_predictions = forecaster.estimator.predict(
         predictions[forecaster.X_train_features_names_out_]
     )
     nan_predictions_index = predictions['pred'].isna()
@@ -2358,6 +2854,667 @@ def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSerie
         expected_predictions, 
         predictions['pred'].to_numpy()
     )
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_series_and_exog_dict_fold_stride():
+    """
+    Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries 
+    when series and exog are dictionaries, encoding='ordinal', and fold_stride is used.
+    """
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=LGBMRegressor(
+            n_estimators=100, random_state=123, verbose=-1, max_depth=4
+        ),
+        lags=[1, 7, 14],
+        encoding='ordinal',
+        dropna_from_series=False,
+        transformer_series=None,
+        transformer_exog=StandardScaler(),
+    )
+
+    cv = TimeSeriesFold(
+             initial_train_size = len(series_dict_nans_train['id_1000']),
+             steps              = 6,
+             fold_stride        = 3,
+             refit              = False
+         )
+
+    metrics, predictions = backtesting_forecaster_multiseries(
+        forecaster        = forecaster,
+        series            = series_dict_nans,
+        exog              = exog_dict_nans,
+        cv                = cv,
+        metric            = ['mean_absolute_error', 'mean_absolute_scaled_error'],
+        n_jobs            = 'auto',
+        verbose           = False,
+        show_progress     = True,
+        suppress_warnings = True
+    )
+
+    expected_metrics = pd.DataFrame(
+        {
+            "levels": {
+                0: "id_1000",
+                1: "id_1001",
+                2: "id_1002",
+                3: "id_1003",
+                4: "id_1004",
+                5: "average",
+                6: "weighted_average",
+                7: "pooling",
+            },
+            "mean_absolute_error": {
+                0: 137.63640920084475,
+                1: 1125.7738019343692,
+                2: np.nan,
+                3: 271.59479275890055,
+                4: 684.2844296219656,
+                5: 554.82235837902,
+                6: 566.5279689272918,
+                7: 566.527968927292,
+            },
+            "mean_absolute_scaled_error": {
+                0: 0.6325905872013097,
+                1: 3.208552015320668,
+                2: np.nan,
+                3: 1.1071639471904091,
+                4: 0.5696246291686657,
+                5: 1.379482794720263,
+                6: 1.664091840444422,
+                7: 1.3758514439155465,
+            },
+        }
+    )
+    expected_predictions = pd.DataFrame(
+        {
+            "level": [
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+            ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+            ],
+            "pred": [
+                1496.6826971645523,
+                3072.3764982469875,
+                3299.191522356802,
+                7072.533812609552,
+                1487.9714641896444,
+                3426.4972780704393,
+                3053.711435102844,
+                8601.965836378662,
+                1452.8419344856684,
+                3252.2993473033084,
+                3004.6608026442464,
+                8885.898621753877,
+                1396.5202568353473,
+                3642.356885360602,
+                2659.034134670032,
+                8808.775425272173,
+                1396.5202568353473,
+                3290.0239566848713,
+                1864.6225324730788,
+                8934.33149885238,
+                1107.9667392445235,
+                2484.4858907270695,
+                2071.549356973606,
+                6347.631033092048,
+                1396.5202568353473,
+                2741.458201980781,
+                1885.108314225759,
+                8808.775425272173,
+                1396.5202568353473,
+                2732.557991608278,
+                1928.4526199581364,
+                8934.33149885238,
+                1107.9667392445235,
+                2808.4765752368116,
+                2152.478850510751,
+                6347.631033092048,
+                999.3757166023669,
+                1996.2149991056203,
+                np.nan,
+                5049.975665851924,
+                1394.6081500274586,
+                3313.4205475549293,
+                np.nan,
+                7082.0444371062185,
+                1456.8667963770772,
+                3278.088830635534,
+                np.nan,
+                8669.715220549642,
+                999.3757166023669,
+                1996.2149991056203,
+                np.nan,
+                5979.040595708178,
+                1394.6081500274586,
+                3313.4205475549293,
+                np.nan,
+                6727.9915808740325,
+                1456.8667963770772,
+                3278.088830635534,
+                np.nan,
+                7496.565716814842,
+            ],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2016-08-01",
+                "2016-08-01",
+                "2016-08-01",
+                "2016-08-01",
+                "2016-08-02",
+                "2016-08-02",
+                "2016-08-02",
+                "2016-08-02",
+                "2016-08-03",
+                "2016-08-03",
+                "2016-08-03",
+                "2016-08-03",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-07",
+                "2016-08-07",
+                "2016-08-07",
+                "2016-08-07",
+                "2016-08-08",
+                "2016-08-08",
+                "2016-08-08",
+                "2016-08-08",
+                "2016-08-09",
+                "2016-08-09",
+                "2016-08-09",
+                "2016-08-09",
+                "2016-08-07",
+                "2016-08-07",
+                "2016-08-07",
+                "2016-08-07",
+                "2016-08-08",
+                "2016-08-08",
+                "2016-08-08",
+                "2016-08-08",
+                "2016-08-09",
+                "2016-08-09",
+                "2016-08-09",
+                "2016-08-09",
+            ],
+            dtype="datetime64[ns]",
+            freq=None,
+        ),
+    )
+
+    pd.testing.assert_frame_equal(metrics, expected_metrics)
+    pd.testing.assert_frame_equal(predictions.head(60), expected_predictions)
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_series_and_exog_dict_fold_stride_greater_than_steps():
+    """
+    Test output of backtesting_forecaster_multiseries in ForecasterRecursiveMultiSeries 
+    when series and exog are dictionaries, encoding='ordinal', and fold_stride is used 
+    and greater than steps.
+    """
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=LGBMRegressor(
+            n_estimators=100, random_state=123, verbose=-1, max_depth=4
+        ),
+        lags=[1, 7, 14],
+        encoding='ordinal',
+        dropna_from_series=False,
+        transformer_series=None,
+        transformer_exog=StandardScaler(),
+    )
+
+    cv = TimeSeriesFold(
+             initial_train_size = len(series_dict_nans_train['id_1000']),
+             steps              = 6,
+             fold_stride        = 9,
+             refit              = False
+         )
+
+    metrics, predictions = backtesting_forecaster_multiseries(
+        forecaster        = forecaster,
+        series            = series_dict_nans,
+        exog              = exog_dict_nans,
+        cv                = cv,
+        metric            = ['mean_absolute_error', 'mean_absolute_scaled_error'],
+        n_jobs            = 'auto',
+        verbose           = False,
+        show_progress     = True,
+        suppress_warnings = True
+    )
+
+    expected_metrics = pd.DataFrame(
+        {
+            "levels": {
+                0: "id_1000",
+                1: "id_1001",
+                2: "id_1002",
+                3: "id_1003",
+                4: "id_1004",
+                5: "average",
+                6: "weighted_average",
+                7: "pooling",
+            },
+            "mean_absolute_error": {
+                0: 148.6020332440131,
+                1: 1227.9321998720077,
+                2: np.nan,
+                3: 328.265097171603,
+                4: 811.1618005336145,
+                5: 628.9902827053096,
+                6: 628.4941665601436,
+                7: 628.4941665601435,
+            },
+            "mean_absolute_scaled_error": {
+                0: 0.6829896828532042,
+                1: 3.4997122226567505,
+                2: np.nan,
+                3: 1.3381820653387495,
+                4: 0.6752422235882412,
+                5: 1.5490315486092363,
+                6: 1.8348312671758897,
+                7: 1.5263405409473236,
+            },
+        }
+    )
+    expected_predictions = pd.DataFrame(
+        {
+            "level": [
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+                "id_1000",
+                "id_1001",
+                "id_1003",
+                "id_1004",
+            ],
+            "fold": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+                2,
+            ],
+            "pred": [
+                1496.6826971645523,
+                3072.3764982469875,
+                3299.191522356802,
+                7072.533812609552,
+                1487.9714641896444,
+                3426.4972780704393,
+                3053.711435102844,
+                8601.965836378662,
+                1452.8419344856684,
+                3252.2993473033084,
+                3004.6608026442464,
+                8885.898621753877,
+                1396.5202568353473,
+                3642.356885360602,
+                2659.034134670032,
+                8808.775425272173,
+                1396.5202568353473,
+                3290.0239566848713,
+                1864.6225324730788,
+                8934.33149885238,
+                1107.9667392445235,
+                2484.4858907270695,
+                2071.549356973606,
+                6347.631033092048,
+                1414.8753525505379,
+                1970.7895327686674,
+                np.nan,
+                8576.324768078144,
+                1396.5202568353473,
+                2371.7852605492076,
+                np.nan,
+                8715.720335897213,
+                1298.5494009891943,
+                2850.6145922844453,
+                np.nan,
+                8909.95666176813,
+                1089.7553408426302,
+                2849.631084588996,
+                np.nan,
+                6093.69986064051,
+                999.3757166023669,
+                2632.2649665399126,
+                np.nan,
+                4431.156825796141,
+                1486.7183596300656,
+                2724.5824532737747,
+                np.nan,
+                6780.925854683978,
+                1415.5343547988482,
+                2014.8866860318237,
+                np.nan,
+                8409.993066869763,
+                1107.9667392445235,
+                2585.9232047473556,
+                np.nan,
+                6520.869613289696,
+                999.3757166023669,
+                2878.480311718611,
+                np.nan,
+                5821.115715072534,
+            ],
+        },
+        index=pd.DatetimeIndex(
+            [
+                "2016-08-01",
+                "2016-08-01",
+                "2016-08-01",
+                "2016-08-01",
+                "2016-08-02",
+                "2016-08-02",
+                "2016-08-02",
+                "2016-08-02",
+                "2016-08-03",
+                "2016-08-03",
+                "2016-08-03",
+                "2016-08-03",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-04",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-05",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-06",
+                "2016-08-10",
+                "2016-08-10",
+                "2016-08-10",
+                "2016-08-10",
+                "2016-08-11",
+                "2016-08-11",
+                "2016-08-11",
+                "2016-08-11",
+                "2016-08-12",
+                "2016-08-12",
+                "2016-08-12",
+                "2016-08-12",
+                "2016-08-13",
+                "2016-08-13",
+                "2016-08-13",
+                "2016-08-13",
+                "2016-08-14",
+                "2016-08-14",
+                "2016-08-14",
+                "2016-08-14",
+                "2016-08-15",
+                "2016-08-15",
+                "2016-08-15",
+                "2016-08-15",
+                "2016-08-19",
+                "2016-08-19",
+                "2016-08-19",
+                "2016-08-19",
+                "2016-08-20",
+                "2016-08-20",
+                "2016-08-20",
+                "2016-08-20",
+                "2016-08-21",
+                "2016-08-21",
+                "2016-08-21",
+                "2016-08-21",
+            ],
+            dtype="datetime64[ns]",
+            freq=None,
+        ),
+    )
+
+    pd.testing.assert_frame_equal(metrics, expected_metrics)
+    pd.testing.assert_frame_equal(predictions.head(60), expected_predictions)
 
 
 # ======================================================================================================================
@@ -2376,14 +3533,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-             initial_train_size = len(series) - 12,
+             initial_train_size = len(series_wide_range) - 12,
              steps              = 3,
              refit              = False,
              fixed_train_size   = False,
@@ -2391,7 +3548,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_wide_range,
                                                cv                    = cv,
                                                levels                = 'l1',
                                                metric                = 'mean_absolute_error',
@@ -2410,7 +3567,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                                0.50561424, 0.47109786, 0.45568319])},
                                index=pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2424,13 +3584,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
-    forecaster.fit(series=series)
+    forecaster.fit(series=series_wide_range)
     cv = TimeSeriesFold(
              initial_train_size = None,
              steps              = 1,
@@ -2439,7 +3599,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
          )
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_wide_range,
                                                cv                    = cv,
                                                levels                = ['l1'],
                                                metric                = mean_absolute_error,
@@ -2463,7 +3623,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                         0.57546277, 0.57700474, 0.50898628])},
         index=pd.RangeIndex(start=2, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', np.arange(0, 48))
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2478,14 +3641,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l2',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-             initial_train_size = len(series) - 12,
+             initial_train_size = len(series_wide_range) - 12,
              steps              = 3,
              refit              = True,
              fixed_train_size   = True,
@@ -2493,7 +3656,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_wide_range,
                                                cv                    = cv,
                                                levels                = None,
                                                metric                = custom_metric,
@@ -2512,7 +3675,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                                0.51476103, 0.48480385, 0.53470992])},
                                index=pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2528,19 +3694,19 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     fixed_train_size with window features with mocked 
     (mocked done in Skforecast v0.14.0).
     """
-    series_dt = series.copy()
-    series_dt.index = pd.date_range(start='2020-01-01', periods=len(series), freq='D')
 
+    calendar_features = CalendarFeatures(features=None, encoding='cyclical')
     window_features = RollingFeatures(
         stats = ['mean', 'std', 'min', 'max', 'sum', 'median', 'ratio_min_max', 'coef_variation'],
         window_sizes = 3,
     )
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      steps              = 3,
                      level              = 'l2',
                      lags               = 2,
                      window_features    = window_features,
+                     calendar_features  = calendar_features,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
@@ -2552,7 +3718,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series_dt,
+                                               series                = series_wide_dt,
                                                cv                    = cv,
                                                levels                = None,
                                                metric                = 'mean_absolute_error',
@@ -2563,18 +3729,22 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                            )
     
     expected_metric = pd.DataFrame({'levels': ['l2'],
-                                    'mean_absolute_error': [0.23856556]})
+                                    'mean_absolute_error': [0.31695055796593363]})
     expected_predictions = pd.DataFrame({
-        'l2': np.array([0.55657737, 0.37891865, 0.43460762, 0.58417451, 0.59388689,
-                        0.55074551, 0.3267003 , 0.33008016, 0.40918253, 0.5313121 ,
-                        0.43536832, 0.5907553])},
+        'l2': np.array([0.97201136233334  , 0.5480159798840707, 0.48061614124414953,
+                        0.6962089185493014, 0.5829518264030495, 0.5115582045625912 ,
+                        0.27862886639702594, 0.24355861627925168, 0.38162616955441964,
+                        0.6443413896298333, 0.6400506761184649 , 0.6904204687003446 ])},
         index=pd.DatetimeIndex(
                     ['2020-02-08', '2020-02-09', '2020-02-10', '2020-02-11', 
                      '2020-02-12', '2020-02-13', '2020-02-14', '2020-02-15', 
                      '2020-02-16', '2020-02-17', '2020-02-18', '2020-02-19'],
                     dtype='datetime64[ns]', freq=None)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions.asfreq('D'), backtest_predictions)
@@ -2589,14 +3759,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             refit              = True,
             fixed_train_size   = False,
@@ -2604,7 +3774,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_wide_range,
                                                cv                    = cv,
                                                levels                = 'l1',
                                                metric                = 'mean_absolute_error',
@@ -2623,7 +3793,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                                0.55296942, 0.53498642, 0.44772825])},
                                index=pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2637,14 +3810,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             refit              = True,
             fixed_train_size   = False,
@@ -2652,7 +3825,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster            = forecaster,
-                                               series                = series,
+                                               series                = series_wide_range,
                                                cv                    = cv,
                                                levels                = 'l1',
                                                metric                = ['mean_absolute_error', mean_absolute_error],
@@ -2672,7 +3845,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                                0.55296942, 0.53498642, 0.44772825])},
                                index=pd.RangeIndex(start=38, stop=50, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions)
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2686,7 +3862,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = {'l1': 3, 'l2': None},
                      steps              = 3,
@@ -2694,7 +3870,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                  )
 
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             refit              = False,
             fixed_train_size   = False,
@@ -2702,13 +3878,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = ['l1'],
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 500,
                                                random_state            = 123,
@@ -2735,7 +3911,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
         index = pd.RangeIndex(start=38, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2749,14 +3928,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     """
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = {'l1': None, 'l2': [1, 3]},
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             refit              = True,
             fixed_train_size   = True,
@@ -2764,13 +3943,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 500,
                                                random_state            = 123,
@@ -2797,7 +3976,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
         index = pd.RangeIndex(start=38, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2810,7 +3992,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = {'l1': 2, 'l2': [1, 3]},
                      steps              = 8,
@@ -2818,7 +4000,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                  )
     
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_wide_range) - 20,
             steps              = 5,
             gap                = 3,
             refit              = False,
@@ -2827,13 +4009,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -2865,7 +4047,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
         index = pd.RangeIndex(start=33, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2878,30 +4063,30 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     intervals (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 8,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
-            steps                   = 5,
-            refit                   = True,
-            fixed_train_size        = False,
-            allow_incomplete_fold   = False,
-            gap                     = 3,
+            initial_train_size    = len(series_wide_range) - 20,
+            steps                 = 5,
+            refit                 = True,
+            fixed_train_size      = False,
+            allow_incomplete_fold = False,
+            gap                   = 3,
         )
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -2931,7 +4116,10 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
                                index = pd.RangeIndex(start=33, stop=48, step=1)
                            )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -2943,34 +4131,31 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     with refit, fixed_train_size, gap, with mocked using exog and intervals 
     (mocked done in Skforecast v0.5.0).
     """
-    series_datetime = series.copy()
-    series_datetime.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
-
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 10,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-             initial_train_size = len(series) - 20,
-             steps                   = 5,
-             refit                   = True,
-             fixed_train_size        = True,
-             allow_incomplete_fold   = False,
-             gap                     = 5,
+             initial_train_size    = len(series_wide_dt) - 20,
+             steps                 = 5,
+             refit                 = True,
+             fixed_train_size      = True,
+             allow_incomplete_fold = False,
+             gap                   = 5,
          )
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_datetime,
+                                               series                  = series_wide_dt,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series_datetime['l1'].rename('exog_1'),
-                                               interval                = [5, 95],
+                                               exog                    = series_wide_dt['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -2998,9 +4183,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                         [0.49225437, 0.31519742, 0.68294248],
                         [0.52528842, 0.33889897, 0.7220394 ]]),
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-        index = pd.date_range(start='2022-02-05', periods=15, freq='D')
+        index = pd.date_range(start='2020-02-05', periods=15, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
     expected_predictions = expected_predictions.asfreq('D')
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
@@ -3014,14 +4202,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     (mocked done in Skforecast v0.9.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 2,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-             initial_train_size    = len(series) - 20,
+             initial_train_size    = len(series_wide_range) - 20,
              steps                 = 2,
              refit                 = 2,
              fixed_train_size      = True,
@@ -3036,13 +4224,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     with pytest.warns(IgnoredArgumentWarning, match = warn_msg):
         metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                    forecaster              = forecaster,
-                                                   series                  = series,
+                                                   series                  = series_wide_range,
                                                    cv                      = cv,
                                                    levels                  = 'l1',
                                                    metric                  = 'mean_absolute_error',
                                                    add_aggregated_metric   = False,                                            
-                                                   exog                    = series['l1'].rename('exog_1'),
-                                                   interval                = [5, 95],
+                                                   exog                    = series_wide_range['l1'].rename('exog_1'),
+                                                   interval                = [0.05, 0.95],
                                                    interval_method         = "bootstrapping",
                                                    n_boot                  = 100,
                                                    random_state            = 123,
@@ -3080,7 +4268,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
         index = pd.RangeIndex(start=30, stop=50, step=1)
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [
+        0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9
+    ])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -3092,20 +4285,15 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     with refit int, interval, gap, with mocked using exog and intervals 
     (mocked done in Skforecast v0.9.0).
     """
-    series_with_index = series.copy()
-    series_with_index.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
-    exog_with_index = series['l1'].rename('exog_1').copy()
-    exog_with_index.index = pd.date_range(start='2022-01-01', periods=50, freq='D')
-
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 7,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-             initial_train_size    = len(series) - 30,
+             initial_train_size    = len(series_wide_dt) - 30,
              steps                 = 4,
              refit                 = 3,
              fixed_train_size      = False,
@@ -3115,13 +4303,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series_with_index,
+                                               series                  = series_wide_dt,
                                                cv                      = cv,
                                                levels                  = ['l1'],
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,                                            
-                                               exog                    = exog_with_index,
-                                               interval                = [5, 95],
+                                               exog                    = series_wide_dt['l1'].rename('exog_1'),
+                                               interval                = 0.90,
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 100,
                                                random_state            = 123,
@@ -3160,9 +4348,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                         [0.34632377, 0.19061503, 0.49984188],
                         [0.44695116, 0.26538166, 0.58345495]]),
         columns = ['l1', 'l1_lower_bound', 'l1_upper_bound'],
-        index = pd.date_range(start='2022-01-24', periods=24, freq='D')
+        index = pd.date_range(start='2020-01-24', periods=24, freq='D')
     )
-    expected_predictions = expected_df_to_long_format(expected_predictions, method='interval')
+    expected_predictions.insert(1, 'fold', [
+        0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-interval'
+    )
     expected_predictions = expected_predictions.asfreq('D')
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
@@ -3176,7 +4368,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = {'l1': 2, 'l2': [1, 3]},
                      steps              = 8,
@@ -3184,7 +4376,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                  )
     
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_wide_range) - 20,
             steps              = 5,
             gap                = 3,
             refit              = False
@@ -3192,13 +4384,13 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
-                                               interval                = [5, 50, 95],
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
+                                               interval                = [0.05, 0.5, 0.95],
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
                                                random_state            = 123,
@@ -3227,10 +4419,11 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                         [0.63726975, 0.45125726, 0.62160023, 0.83192751],
                         [0.54013414, 0.36193754, 0.54426771, 0.72007411],
                         [0.52550978, 0.32075102, 0.52254263, 0.68449266]]),
-        columns = ['pred', 'p_5', 'p_50', 'p_95'],
+        columns = ['pred', 'q_0.05', 'q_0.5', 'q_0.95'],
         index = pd.RangeIndex(start=33, stop=50, step=1)
     )
     expected_predictions.insert(0, 'level', np.tile(['l1'], len(expected_predictions)))
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3])
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
@@ -3243,7 +4436,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     distribution (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = {'l1': 2, 'l2': [1, 3]},
                      steps              = 8,
@@ -3251,7 +4444,7 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                  )
     
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 20,
+            initial_train_size = len(series_wide_range) - 20,
             steps              = 5,
             gap                = 3,
             refit              = False
@@ -3259,12 +4452,12 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
                                                interval                = norm,
                                                interval_method         = "bootstrapping",
                                                n_boot                  = 150,
@@ -3298,13 +4491,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
         index = pd.RangeIndex(start=33, stop=50, step=1)
     )
     expected_predictions.insert(0, 'level', np.tile(['l1'], len(expected_predictions)))
-                                   
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3])
+
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
 
 @pytest.mark.parametrize("interval", 
-                         [0.90, (5, 95)], 
+                         [0.90, (0.05, 0.95)], 
                          ids = lambda value: f'interval: {value}')
 def test_output_backtesting_forecaster_interval_conformal_and_binned_with_mocked_ForecasterDirectMultiVariate(interval):
     """
@@ -3313,7 +4507,7 @@ def test_output_backtesting_forecaster_interval_conformal_and_binned_with_mocked
     (mocked done in Skforecast v0.15.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 3,
                      steps              = 5,
@@ -3322,19 +4516,19 @@ def test_output_backtesting_forecaster_interval_conformal_and_binned_with_mocked
                  )
     
     cv = TimeSeriesFold(
-             initial_train_size = len(series) - 20,
+             initial_train_size = len(series_wide_range) - 20,
              steps              = 5,
              refit              = False
          )
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster              = forecaster,
-                                               series                  = series,
+                                               series                  = series_wide_range,
                                                cv                      = cv,
                                                levels                  = 'l1',
                                                metric                  = 'mean_absolute_error',
                                                add_aggregated_metric   = False,
-                                               exog                    = series['l1'].rename('exog_1'),
+                                               exog                    = series_wide_range['l1'].rename('exog_1'),
                                                interval                = interval,
                                                interval_method         = 'conformal',
                                                use_in_sample_residuals = True,
@@ -3370,7 +4564,8 @@ def test_output_backtesting_forecaster_interval_conformal_and_binned_with_mocked
         index = pd.RangeIndex(start=30, stop=50, step=1)
     )
     expected_predictions.insert(0, 'level', np.tile(['l1'], len(expected_predictions)))
-                                   
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3])
+
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
 
@@ -3383,14 +4578,14 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
     predict method.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-             initial_train_size = len(series) - 12,
+             initial_train_size = len(series_wide_range) - 12,
              steps              = 3,
              refit              = False,
              fixed_train_size   = False,
@@ -3398,8 +4593,8 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
 
     metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
                                                forecaster         = forecaster,
-                                               series             = series,
-                                               exog               = series['l1'].rename('exog_1'),
+                                               series             = series_wide_range,
+                                               exog               = series_wide_range['l1'].rename('exog_1'),
                                                cv                 = cv,
                                                levels             = 'l1',
                                                metric             = 'mean_absolute_error',
@@ -3411,18 +4606,614 @@ def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_
                                     'mean_absolute_error': [0.080981301131163]})
     
     forecaster.fit(
-        series = series.iloc[:len(series) - 12],
-        exog   = series.iloc[:len(series) - 12]['l1'].rename('exog_1')
+        series = series_wide_range.iloc[:len(series_wide_range) - 12],
+        exog   = series_wide_range.iloc[:len(series_wide_range) - 12]['l1'].rename('exog_1')
     )
-    regressors = [1, 2, 3] * 4
+    estimators = [1, 2, 3] * 4
     len_predictions = len(backtest_predictions)
     results = np.full(shape=len_predictions, fill_value=np.nan, dtype=float)
-    for i, step in enumerate(regressors):
-        results[i] = forecaster.regressors_[step].predict(
+    for i, step in enumerate(estimators):
+        results[i] = forecaster.estimators_[step].predict(
             backtest_predictions.iloc[[i]][
                 ['l1_lag_1', 'l1_lag_2', 'l2_lag_1', 'l2_lag_2', 'exog_1']
             ]
-        )
+        ).item()
                                    
     pd.testing.assert_frame_equal(expected_metric, metrics_levels)
     np.testing.assert_array_almost_equal(results, backtest_predictions['pred'].to_numpy())
+
+
+def test_output_backtesting_forecaster_ForecasterDirectMultiVariate_fold_stride():
+    """
+    Test output of backtesting_forecaster_multiseries in ForecasterDirectMultiVariate 
+    with no refit with mocked using fold stride.
+    (mocked done in Skforecast v0.18.0).
+    """
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator          = Ridge(random_state=123),
+                     level              = 'l1',
+                     lags               = 3,
+                     steps              = 5,
+                     transformer_series = None,
+                 )
+    
+    cv = TimeSeriesFold(
+             initial_train_size = len(series_wide_range) - 20,
+             steps              = 5,
+             fold_stride        = 3,
+             refit              = False
+         )
+
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster            = forecaster,
+                                               series                = series_wide_range,
+                                               cv                    = cv,
+                                               levels                = 'l1',
+                                               metric                = 'mean_absolute_error',
+                                               add_aggregated_metric = False,
+                                               exog                  = series_wide_range['l1'].rename('exog_1'),
+                                               random_state          = 123,
+                                               verbose               = False
+                                           )
+    
+    expected_metric = pd.DataFrame({'levels': ['l1'], 
+                                    'mean_absolute_error': [0.1110500102960009]})
+    expected_predictions = pd.DataFrame(
+        data = np.array([
+            [0.        , 0.36268205],
+            [0.        , 0.51787041],
+            [0.        , 0.52472422],
+            [0.        , 0.59903598],
+            [0.        , 0.50738853],
+            [1.        , 0.48881923],
+            [1.        , 0.48843457],
+            [1.        , 0.43042214],
+            [1.        , 0.53517054],
+            [1.        , 0.67818829],
+            [2.        , 0.45435034],
+            [2.        , 0.68926351],
+            [2.        , 0.69673039],
+            [2.        , 0.51511   ],
+            [2.        , 0.51222045],
+            [3.        , 0.55179877],
+            [3.        , 0.62436174],
+            [3.        , 0.35535408],
+            [3.        , 0.41023648],
+            [3.        , 0.44663944],
+            [4.        , 0.39436005],
+            [4.        , 0.47991353],
+            [4.        , 0.65933721],
+            [4.        , 0.38570842],
+            [4.        , 0.45739258],
+            [5.        , 0.39528807],
+            [5.        , 0.47347775],
+            [5.        , 0.76236728],
+            [5.        , 0.53407054],
+            [5.        , 0.5014202 ],
+            [6.        , 0.55466973],
+            [6.        , 0.55769425]]),
+        columns = ['fold', 'pred'],
+        index = pd.Index([
+                    30, 31, 32, 33, 34, 33, 34, 35, 36, 37, 36, 37, 38, 39, 40, 39, 40, 41,
+                    42, 43, 42, 43, 44, 45, 46, 45, 46, 47, 48, 49, 48, 49
+                ])
+    ).astype({'fold': int})
+    expected_predictions.insert(0, 'level', np.tile(['l1'], len(expected_predictions)))
+                                   
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+def test_output_backtesting_forecaster_ForecasterDirectMultiVariate_fold_stride_greater_than_steps():
+    """
+    Test output of backtesting_forecaster_multiseries in ForecasterDirectMultiVariate 
+    with no refit with mocked using fold stride greater than steps.
+    (mocked done in Skforecast v0.18.0).
+    """
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator          = Ridge(random_state=123),
+                     level              = 'l1',
+                     lags               = 3,
+                     steps              = 5,
+                     transformer_series = None,
+                 )
+    
+    cv = TimeSeriesFold(
+             initial_train_size = len(series_wide_range) - 20,
+             steps              = 5,
+             fold_stride        = 10,
+             refit              = False
+         )
+
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster            = forecaster,
+                                               series                = series_wide_range,
+                                               cv                    = cv,
+                                               levels                = 'l1',
+                                               metric                = 'mean_absolute_error',
+                                               add_aggregated_metric = False,
+                                               exog                  = series_wide_range['l1'].rename('exog_1'),
+                                               random_state          = 123,
+                                               verbose               = False
+                                           )
+    
+    expected_metric = pd.DataFrame({'levels': ['l1'], 
+                                    'mean_absolute_error': [0.12953535188286774]})
+    expected_predictions = pd.DataFrame(
+        data = np.array([
+            [0.        , 0.36268205],
+            [0.        , 0.51787041],
+            [0.        , 0.52472422],
+            [0.        , 0.59903598],
+            [0.        , 0.50738853],
+            [1.        , 0.61296286],
+            [1.        , 0.4031027 ],
+            [1.        , 0.39728743],
+            [1.        , 0.46010284],
+            [1.        , 0.63022554]]),
+        columns = ['fold', 'pred'],
+        index = pd.Index([
+                    30, 31, 32, 33, 34, 40, 41, 42, 43, 44
+                ])
+    ).astype({'fold': int})
+    expected_predictions.insert(0, 'level', np.tile(['l1'], len(expected_predictions)))
+                                   
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+# ******************************************************************************
+# * Categorical features                                                       *
+# ******************************************************************************
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_no_refit_categorical_features_auto_with_mocked():
+    """
+    Test output of backtesting_forecaster_multiseries in
+    ForecasterRecursiveMultiSeries with no refit,
+    categorical_features='auto', transformer_exog with StandardScaler for
+    numeric columns, and exog with string and numeric columns.
+    Estimator is HistGradientBoostingRegressor.
+    """
+    rng = np.random.default_rng(42)
+    exog_cat = pd.DataFrame({
+        'exog_num_1': rng.random(50),
+        'exog_num_2': rng.random(50),
+        'exog_cat_1': ['a', 'b', 'c'] * 16 + ['a', 'b'],
+        'exog_cat_2': pd.Categorical(['X', 'Y'] * 25)
+    })
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+
+    expected_metric = pd.DataFrame(
+        data    = [['l1', 0.24365815227401977],
+                   ['l2', 0.19527980897358788]],
+        columns = ['levels', 'mean_absolute_error']
+    )
+    expected_predictions = pd.DataFrame({
+        'l1': np.array([
+            0.4585004, 0.55136151, 0.56366294, 0.70218157,
+            0.60312407, 0.51909777, 0.45212952, 0.46178819,
+            0.52327531, 0.48410623, 0.39759812, 0.55023856,
+        ]),
+        'l2': np.array([
+            0.36939255, 0.58356746, 0.55363474, 0.59851332,
+            0.47777808, 0.38234516, 0.53561326, 0.65388352,
+            0.57183009, 0.4324733, 0.48820272, 0.58954394,
+        ])},
+        index=pd.RangeIndex(start=38, stop=50, step=1)
+    )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
+
+    forecaster = ForecasterRecursiveMultiSeries(
+                     estimator            = HistGradientBoostingRegressor(random_state=123),
+                     lags                 = 3,
+                     encoding             = 'ordinal',
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = 'auto'
+                 )
+
+    cv = TimeSeriesFold(
+            steps                 = 4,
+            initial_train_size    = len(series_dict_range['l1']) - 12,
+            window_size           = None,
+            differentiation       = None,
+            refit                 = False,
+            fixed_train_size      = True,
+            gap                   = 0,
+            skip_folds            = None,
+            allow_incomplete_fold = True,
+            return_all_indexes    = False,
+        )
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster            = forecaster,
+                                               series                = series_dict_range,
+                                               cv                    = cv,
+                                               levels                = None,
+                                               metric                = 'mean_absolute_error',
+                                               add_aggregated_metric = False,
+                                               exog                  = exog_cat,
+                                               verbose               = False
+                                           )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_no_refit_categorical_features_auto_with_mocked():
+    """
+    Test output of backtesting_forecaster_multiseries in
+    ForecasterDirectMultiVariate with no refit,
+    categorical_features='auto', transformer_exog with StandardScaler for
+    numeric columns, and exog with string and numeric columns.
+    Estimator is CatBoostRegressor.
+    """
+    rng = np.random.default_rng(42)
+    exog_cat = pd.DataFrame({
+        'exog_num_1': rng.random(50),
+        'exog_num_2': rng.random(50),
+        'exog_cat_1': ['a', 'b', 'c'] * 16 + ['a', 'b'],
+        'exog_cat_2': pd.Categorical(['X', 'Y'] * 25)
+    })
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+
+    expected_metric = pd.DataFrame(
+        data    = [['l1', 0.23700085444331465]],
+        columns = ['levels', 'mean_absolute_error']
+    )
+    expected_predictions = pd.DataFrame({
+        'l1': np.array([
+            0.47568264, 0.47802318, 0.53233797, 0.64214284,
+            0.56794786, 0.48509545, 0.52069729, 0.44968413,
+            0.41865123, 0.4266115, 0.45018425, 0.43771902,
+        ])},
+        index=pd.RangeIndex(start=38, stop=50, step=1)
+    )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator            = CatBoostRegressor(
+                         random_state=123, silent=True, allow_writing_files=False
+                     ),
+                     level                = 'l1',
+                     lags                 = 3,
+                     steps                = 4,
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = 'auto'
+                 )
+
+    cv = TimeSeriesFold(
+            steps                 = 4,
+            initial_train_size    = len(series_wide_range) - 12,
+            window_size           = None,
+            differentiation       = None,
+            refit                 = False,
+            fixed_train_size      = True,
+            gap                   = 0,
+            skip_folds            = None,
+            allow_incomplete_fold = True,
+            return_all_indexes    = False,
+        )
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster            = forecaster,
+                                               series                = series_wide_range,
+                                               cv                    = cv,
+                                               levels                = 'l1',
+                                               metric                = 'mean_absolute_error',
+                                               add_aggregated_metric = False,
+                                               exog                  = exog_cat,
+                                               verbose               = False
+                                           )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterRecursiveMultiSeries_refit_categorical_features_auto_with_mocked():
+    """
+    Test output of backtesting_forecaster_multiseries in
+    ForecasterRecursiveMultiSeries with refit,
+    categorical_features='auto', transformer_exog with StandardScaler for
+    numeric columns, and exog with string and numeric columns.
+    Estimator is XGBRegressor.
+    """
+    rng = np.random.default_rng(42)
+    exog_cat = pd.DataFrame({
+        'exog_num_1': rng.random(50),
+        'exog_num_2': rng.random(50),
+        'exog_cat_1': ['a', 'b', 'c'] * 16 + ['a', 'b'],
+        'exog_cat_2': pd.Categorical(['X', 'Y'] * 25)
+    })
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+
+    expected_metric = pd.DataFrame(
+        data    = [['l1', 0.2819866076310523],
+                   ['l2', 0.26503932731196717]],
+        columns = ['levels', 'mean_absolute_error']
+    )
+    expected_predictions = pd.DataFrame({
+        'l1': np.array([
+            0.47535372, 0.72084892, 0.08306736, 0.38158172,
+            0.73890454, 0.2905409, 0.43967831, 0.49131632,
+            0.44075468, 0.38727483, 0.54208934, 0.62550145,
+        ]),
+        'l2': np.array([
+            0.57998526, 0.39582357, 0.26319486, 0.41999069,
+            0.65244019, 0.58832878, 0.20413074, 0.56300819,
+            0.4344615, 0.53283393, 0.5713653, 0.49293163,
+        ])},
+        index=pd.RangeIndex(start=38, stop=50, step=1)
+    )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
+
+    forecaster = ForecasterRecursiveMultiSeries(
+                     estimator            = XGBRegressor(random_state=123, verbosity=0),
+                     lags                 = 3,
+                     encoding             = 'ordinal',
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = 'auto'
+                 )
+
+    cv = TimeSeriesFold(
+            steps                 = 4,
+            initial_train_size    = len(series_dict_range['l1']) - 12,
+            window_size           = None,
+            differentiation       = None,
+            refit                 = True,
+            fixed_train_size      = False,
+            gap                   = 0,
+            skip_folds            = None,
+            allow_incomplete_fold = True,
+            return_all_indexes    = False,
+        )
+
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster            = forecaster,
+                                               series                = series_dict_range,
+                                               cv                    = cv,
+                                               levels                = None,
+                                               metric                = 'mean_absolute_error',
+                                               add_aggregated_metric = False,
+                                               exog                  = exog_cat,
+                                               verbose               = False,
+                                               suppress_warnings     = True
+                                           )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_refit_categorical_features_auto_with_mocked():
+    """
+    Test output of backtesting_forecaster_multiseries in
+    ForecasterDirectMultiVariate with refit,
+    categorical_features='auto', transformer_exog with StandardScaler for
+    numeric columns, and exog with string and numeric columns.
+    Estimator is LGBMRegressor.
+    """
+    rng = np.random.default_rng(42)
+    exog_cat = pd.DataFrame({
+        'exog_num_1': rng.random(50),
+        'exog_num_2': rng.random(50),
+        'exog_cat_1': ['a', 'b', 'c'] * 16 + ['a', 'b'],
+        'exog_cat_2': pd.Categorical(['X', 'Y'] * 25)
+    })
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+
+    expected_metric = pd.DataFrame(
+        data    = [['l1', 0.21879851179885978]],
+        columns = ['levels', 'mean_absolute_error']
+    )
+    expected_predictions = pd.DataFrame({
+        'l1': np.array([
+            0.48800043, 0.48053, 0.47137008, 0.48606641,
+            0.50533821, 0.50396381, 0.50131059, 0.49276926,
+            0.55077197, 0.47710173, 0.52735778, 0.45638077,
+        ])},
+        index=pd.RangeIndex(start=38, stop=50, step=1)
+    )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator            = LGBMRegressor(random_state=123, verbose=-1),
+                     level                = 'l1',
+                     lags                 = 3,
+                     steps                = 4,
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = 'auto'
+                 )
+
+    cv = TimeSeriesFold(
+            steps                 = 4,
+            initial_train_size    = len(series_wide_range) - 12,
+            window_size           = None,
+            differentiation       = None,
+            refit                 = True,
+            fixed_train_size      = False,
+            gap                   = 0,
+            skip_folds            = None,
+            allow_incomplete_fold = True,
+            return_all_indexes    = False,
+        )
+    metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                               forecaster            = forecaster,
+                                               series                = series_wide_range,
+                                               cv                    = cv,
+                                               levels                = 'l1',
+                                               metric                = 'mean_absolute_error',
+                                               add_aggregated_metric = False,
+                                               exog                  = exog_cat,
+                                               verbose               = False
+                                           )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+# ******************************************************************************
+# * Test backtesting ForecasterDirectMultiVariate with NaN values              *
+# ******************************************************************************
+
+def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_no_refit_y_with_NaN_dropna_False():
+    """
+    Test output of backtesting_forecaster_multiseries for
+    ForecasterDirectMultiVariate with refit=False, series containing NaN
+    values, and dropna_from_series=False.
+    """
+
+    series_nan = series_wide_range.copy()
+    series_nan.loc[5, 'l1'] = np.nan
+    series_nan.loc[15, 'l1'] = np.nan
+    series_nan.loc[25, 'l1'] = np.nan
+    series_nan.loc[10, 'l2'] = np.nan
+    series_nan.loc[20, 'l2'] = np.nan
+    series_nan.loc[30, 'l2'] = np.nan
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator          = HistGradientBoostingRegressor(random_state=123),
+                     level              = 'l1',
+                     lags               = 3,
+                     steps              = 4,
+                     transformer_series = None,
+                     dropna_from_series = False,
+                 )
+    cv = TimeSeriesFold(
+             steps              = 4,
+             initial_train_size = len(series_nan) - 12,
+             refit              = False,
+             fixed_train_size   = True,
+         )
+
+    with pytest.warns(MissingValuesWarning):
+        metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                                   forecaster            = forecaster,
+                                                   series                = series_nan,
+                                                   cv                    = cv,
+                                                   levels                = 'l1',
+                                                   metric                = 'mean_absolute_error',
+                                                   add_aggregated_metric = False,
+                                                   exog                  = None,
+                                                   verbose               = False,
+                                               )
+
+    expected_metric = pd.DataFrame(
+        data    = [['l1', 0.21312112322701152]],
+        columns = ['levels', 'mean_absolute_error'],
+    )
+    expected_predictions = pd.DataFrame({
+        'l1': np.array([
+            0.4873087227586208, 0.4790654968965517,
+            0.4689579913793103, 0.483105697,
+            0.4873087227586208, 0.4790654968965517,
+            0.4689579913793103, 0.483105697,
+            0.4873087227586208, 0.4790654968965517,
+            0.4689579913793103, 0.483105697,
+        ])},
+        index = pd.RangeIndex(start=38, stop=50, step=1),
+    )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)
+
+
+def test_output_backtesting_forecaster_multiseries_ForecasterDirectMultiVariate_refit_y_with_NaN_dropna_True():
+    """
+    Test output of backtesting_forecaster_multiseries for
+    ForecasterDirectMultiVariate with refit=True, series containing NaN
+    values, and dropna_from_series=True.
+    """
+
+    series_nan = series_wide_range.copy()
+    series_nan.loc[5, 'l1'] = np.nan
+    series_nan.loc[15, 'l1'] = np.nan
+    series_nan.loc[25, 'l1'] = np.nan
+    series_nan.loc[10, 'l2'] = np.nan
+    series_nan.loc[20, 'l2'] = np.nan
+    series_nan.loc[30, 'l2'] = np.nan
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator          = HistGradientBoostingRegressor(random_state=123),
+                     level              = 'l1',
+                     lags               = 3,
+                     steps              = 4,
+                     transformer_series = None,
+                     dropna_from_series = True,
+                 )
+    cv = TimeSeriesFold(
+             steps              = 4,
+             initial_train_size = len(series_nan) - 12,
+             refit              = True,
+             fixed_train_size   = False,
+         )
+
+    with pytest.warns(MissingValuesWarning):
+        metrics_levels, backtest_predictions = backtesting_forecaster_multiseries(
+                                                   forecaster            = forecaster,
+                                                   series                = series_nan,
+                                                   cv                    = cv,
+                                                   levels                = 'l1',
+                                                   metric                = 'mean_absolute_error',
+                                                   add_aggregated_metric = False,
+                                                   exog                  = None,
+                                                   verbose               = False,
+                                               )
+
+    expected_metric = pd.DataFrame(
+        data    = [['l1', 0.20841431023260296]],
+        columns = ['levels', 'mean_absolute_error'],
+    )
+    expected_predictions = pd.DataFrame({
+        'l1': np.array([
+            0.4947006199999999, 0.5126037609090908,
+            0.511231816923077, 0.5019408742857142,
+            0.5345245686666666, 0.5602919026666665,
+            0.5652560252941177, 0.511818905,
+            0.5040295810526316, 0.5197927147368421,
+            0.5392091276190477, 0.5028007504545454,
+        ])},
+        index = pd.RangeIndex(start=38, stop=50, step=1),
+    )
+    expected_predictions.insert(1, 'fold', [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2])
+    expected_predictions = expected_df_to_long_format(
+        expected_predictions, method='backtesting-predict'
+    )
+
+    pd.testing.assert_frame_equal(expected_metric, metrics_levels)
+    pd.testing.assert_frame_equal(expected_predictions, backtest_predictions)

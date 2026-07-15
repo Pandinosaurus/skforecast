@@ -6,17 +6,21 @@
 # coding=utf-8
 
 from __future__ import annotations
+import os
 from typing import Any
+from pathlib import Path
+import warnings
 import numpy as np
 import pandas as pd
-from ..utils import check_optional_dependency
+from scipy.stats import gaussian_kde
+from ..utils import check_optional_dependency, input_to_frame
+from ..exceptions import IgnoredArgumentWarning
 
 try:
     import matplotlib
     import matplotlib.pyplot as plt
-    import seaborn as sns
+    from matplotlib.animation import FuncAnimation, PillowWriter
     from statsmodels.graphics.tsaplots import plot_acf
-    from statsmodels.tsa.stattools import acf, pacf
 except Exception as e:
     package_name = str(e).split(" ")[-1].replace("'", "")
     check_optional_dependency(package_name=package_name)
@@ -34,7 +38,7 @@ def plot_residuals(
     ----------
     residuals : pandas Series, numpy ndarray, default None.
         Values of residuals. If `None`, residuals are calculated internally using
-        `y_true` and `y_true`.
+        `y_true` and `y_pred`.
     y_true : pandas Series, numpy ndarray, default None.
         Ground truth (correct) values. Ignored if residuals is not `None`.
     y_pred : pandas Series, numpy ndarray, default None. 
@@ -69,7 +73,22 @@ def plot_residuals(
     ax3 = plt.subplot(gs[1, 1])
     
     ax1.plot(residuals)
-    sns.histplot(residuals, kde=True, bins=30, ax=ax2)
+    residuals_kde = np.asarray(residuals, dtype=float)
+    residuals_kde = residuals_kde[~np.isnan(residuals_kde)]
+    hist_color = "C0"
+    _, bin_edges, _ = ax2.hist(
+        residuals_kde,
+        bins=30,
+        facecolor=matplotlib.colors.to_rgba(hist_color, 0.5),
+        edgecolor=matplotlib.rcParams["patch.edgecolor"],
+        linewidth=0.5,
+    )
+    if residuals_kde.size > 1 and np.ptp(residuals_kde) > 0:
+        kde = gaussian_kde(residuals_kde)
+        x_kde = np.linspace(bin_edges[0], bin_edges[-1], 200)
+        bin_width = bin_edges[1] - bin_edges[0]
+        ax2.plot(x_kde, kde(x_kde) * residuals_kde.size * bin_width, color=hist_color)
+    ax2.set_ylabel("Count")
     plot_acf(residuals, ax=ax3, lags=60)
     
     ax1.set_title("Residuals")
@@ -106,14 +125,35 @@ def plot_multivariate_time_series_corr(
 
     if ax is None:
         fig, ax = plt.subplots(1, 1, **fig_kw)
-    
-    sns.heatmap(
-        corr,
-        annot=True,
-        linewidths=.5,
-        ax=ax,
-        cmap=sns.color_palette("viridis", as_cmap=True)
-    )
+    else:
+        fig = ax.get_figure()
+
+    values = corr.to_numpy()
+    im = ax.imshow(values, cmap='viridis', aspect='auto')
+    fig.colorbar(im, ax=ax)
+
+    ax.set_xticks(np.arange(corr.shape[1]))
+    ax.set_yticks(np.arange(corr.shape[0]))
+    ax.set_xticklabels(corr.columns)
+    ax.set_yticklabels(corr.index)
+
+    # Minor ticks to draw separating grid lines between cells
+    ax.set_xticks(np.arange(corr.shape[1] + 1) - 0.5, minor=True)
+    ax.set_yticks(np.arange(corr.shape[0] + 1) - 0.5, minor=True)
+    ax.grid(which='minor', color='w', linewidth=0.5)
+    ax.tick_params(which='minor', bottom=False, left=False)
+
+    # Annotate each cell, choosing text color for contrast with the background
+    for i in range(values.shape[0]):
+        for j in range(values.shape[1]):
+            value = values[i, j]
+            r, g, b, _ = im.cmap(im.norm(value))
+            luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            ax.text(
+                j, i, f"{value:.2g}",
+                ha='center', va='center',
+                color='white' if luminance < 0.5 else 'black'
+            )
 
     ax.set_xlabel('Time series')
     
@@ -148,7 +188,7 @@ def plot_prediction_distribution(
     """
 
     index = bootstrapping_predictions.index.astype(str).to_list()[::-1]
-    palette = sns.cubehelix_palette(len(index), rot=-.25, light=.7, reverse=False)
+    palette = plt.get_cmap('cubehelix')(np.linspace(0.15, 0.7, len(index)))
     fig, axs = plt.subplots(len(index), 1, sharex=True, **fig_kw)
     if not isinstance(axs, np.ndarray):
         axs = np.array([axs])
@@ -303,113 +343,277 @@ def plot_prediction_intervals(
         ax.set_xlim(initial_x_zoom)
 
 
-def calculate_lag_autocorrelation(
+def backtesting_gif_creator(
     data: pd.Series | pd.DataFrame,
-    n_lags: int = 50,
-    last_n_samples: int | None = None,
-    sort_by: str = "partial_autocorrelation_abs",
-    acf_kwargs: dict[str, object] = {},
-    pacf_kwargs: dict[str, object] = {},
-) -> pd.DataFrame:
+    cv: object,
+    series_to_plot: list[str] | None = None,
+    plot_last_window: bool = False,
+    filename: str = "backtesting.gif",
+    plt_style: str = "ggplot",
+    figsize: tuple[int, int] = (9, 4),
+    colors: dict[str, str] | None = None,
+    title_template: str = "Backtesting — Fold {fold_num} (refit: {refit})",
+    fps: int = 2,
+    dpi: int = 100
+) -> Path:
     """
-    Calculate autocorrelation and partial autocorrelation for a time series.
-    This is a wrapper around statsmodels.acf [1]_ and statsmodels.pacf [2]_.
+    Create a GIF of the backtesting folds using Matplotlib FuncAnimation.
 
     Parameters
     ----------
     data : pandas Series, pandas DataFrame
-        Time series to calculate autocorrelation. If a DataFrame is provided,
-        it must have exactly one column.
-    n_lags : int
-        Number of lags to calculate autocorrelation.
-    last_n_samples : int or None, default None
-        Number of most recent samples to use. If None, use the entire series. 
-        Note that partial correlations can only be computed for lags up to 
-        50% of the sample size. For example, if the series has 10 samples, 
-        `n_lags` must be less than or equal to 5. This parameter is useful
-        to speed up calculations when the series is very long.
-    sort_by : str, default 'partial_autocorrelation_abs'
-        Sort results by 'lag', 'partial_autocorrelation_abs', 
-        'partial_autocorrelation', 'autocorrelation_abs' or 'autocorrelation'.
-    acf_kwargs : dict, default {}
-        Optional arguments to pass to statsmodels.tsa.stattools.acf.
-    pacf_kwargs : dict, default {}
-        Optional arguments to pass to statsmodels.tsa.stattools.pacf.
+        Time series data to be used for backtesting. Can be a single series or 
+        multiple series.
+    cv : TimeSeriesFold
+        TimeSeriesFold object with the information needed to split the data into folds.
+    series_to_plot : list, default None
+        List of series names to plot. If None, all series will be plotted.
+    plot_last_window : bool, default False
+        Whether to plot the last window of the time series. If True, window_size 
+        must be specified in the cv object. 
+    filename : str, default "backtesting.gif"
+        Name of the output GIF file.
+    figsize : tuple, default (9, 4)
+        Size of the figure.
+    plt_style : str, default "ggplot"
+        Style to use for the plots. See Matplotlib styles for available options 
+        here: https://matplotlib.org/stable/gallery/style_sheets/style_sheets_reference.html.
+    colors : dict, default None
+        Dictionary with colors for the different elements of the plot. Must 
+        contain the following keys: ['train', 'last_window', 'gap', 'test', 'v_lines'].
+        Defaults colors are {"train": "#329239", "last_window": "#f7931a",
+        "gap": "#4d4d4d", "test": "#0d579b", "v_lines": "#252525"}
+    title_template : str, default "Backtesting — Fold {fold_num} (refit: {refit})"
+        Template for the title of each plot.
+    fps : int, default 2
+        Frames per second for the GIF.
+    dpi : int, default 100
+        Dots per inch for the GIF.
 
     Returns
     -------
-    results : pandas DataFrame
-        Autocorrelation and partial autocorrelation values.
-
-    References
-    ----------
-    .. [1] Statsmodels acf API Reference.
-           https://www.statsmodels.org/stable/generated/statsmodels.tsa.stattools.acf.html
-    
-    .. [2] Statsmodels pacf API Reference.
-           https://www.statsmodels.org/stable/generated/statsmodels.tsa.stattools.pacf.html
-
-    Examples
-    --------
-    ```python
-    import pandas as pd
-    from skforecast.plot import calculate_lag_autocorrelation
-
-    data = pd.Series([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-    calculate_lag_autocorrelation(data = data, n_lags = 4)
-    
-    #    lag  partial_autocorrelation_abs  partial_autocorrelation  autocorrelation_abs  autocorrelation
-    # 0    1                     0.777778                 0.777778             0.700000         0.700000
-    # 1    4                     0.360707                -0.360707             0.078788        -0.078788
-    # 2    3                     0.274510                -0.274510             0.148485         0.148485
-    # 3    2                     0.227273                -0.227273             0.412121         0.412121
-    ```
+    filename_path : Path
+        Path to the output GIF file.
 
     """
 
-    if not isinstance(data, (pd.Series, pd.DataFrame)):
+    if isinstance(data, pd.Series):
+        data = input_to_frame(
+                   data       = data, 
+                   input_name = data.name if data.name is not None else 'y'
+               )
+
+    if not isinstance(data, pd.DataFrame):
         raise TypeError(
-            f"`data` must be a pandas Series or a DataFrame with a single column. "
-            f"Got {type(data)}."
-        )
-    if isinstance(data, pd.DataFrame) and data.shape[1] != 1:
-        raise ValueError(
-            f"If `data` is a DataFrame, it must have exactly one column. "
-            f"Got {data.shape[1]} columns."
-        )
-    if not isinstance(n_lags, int) or n_lags <= 0:
-        raise TypeError(f"`n_lags` must be a positive integer. Got {n_lags}.")
-    
-    if last_n_samples is not None:
-        if not isinstance(last_n_samples, int) or last_n_samples <= 0:
-            raise TypeError(f"`last_n_samples` must be a positive integer. Got {last_n_samples}.")
-        data = data.iloc[-last_n_samples:]
-
-    if sort_by not in [
-        "lag", "partial_autocorrelation_abs", "partial_autocorrelation",
-        "autocorrelation_abs", "autocorrelation",
-    ]:
-        raise ValueError(
-            "`sort_by` must be 'lag', 'partial_autocorrelation_abs', 'partial_autocorrelation', "
-            "'autocorrelation_abs' or 'autocorrelation'."
+            f"`data` must be a pandas Series or DataFrame. Got {type(data)}."
         )
 
-    pacf_values = pacf(data, nlags=n_lags, **pacf_kwargs)
-    acf_values = acf(data, nlags=n_lags, **acf_kwargs)
+    if not isinstance(data.index, (pd.RangeIndex, pd.DatetimeIndex)):
+        raise TypeError(
+            f"`data` must have a pandas RangeIndex or DatetimeIndex. Got {type(data.index)}."
+        )
 
-    results = pd.DataFrame(
-        {
-            "lag": range(n_lags + 1),
-            "partial_autocorrelation_abs": np.abs(pacf_values),
-            "partial_autocorrelation": pacf_values,
-            "autocorrelation_abs": np.abs(acf_values),
-            "autocorrelation": acf_values,
-        }
-    ).iloc[1:]
+    cv_name = type(cv).__name__
+    if cv_name != "TimeSeriesFold":
+        raise TypeError(
+            f"`cv` must be a 'TimeSeriesFold' object. Got '{cv_name}'."
+        )
 
-    if sort_by == "lag":
-        results = results.sort_values(by=sort_by, ascending=True).reset_index(drop=True)
+    if not isinstance(fps, int) or fps <= 0:
+        raise TypeError(f"`fps` must be a positive integer. Got {fps}.")
+    if not isinstance(dpi, int) or dpi <= 0:
+        raise TypeError(f"`dpi` must be a positive integer. Got {dpi}.")
+
+    if series_to_plot is None:
+        series_to_plot = data.columns.to_list()
     else:
-        results = results.sort_values(by=sort_by, ascending=False).reset_index(drop=True)
+        if not isinstance(series_to_plot, list):
+            raise TypeError(
+                f"`series_to_plot` must be a list of column names. Got {type(series_to_plot)}."
+            )
+        missing_cols = [col for col in series_to_plot if col not in data.columns]
+        if missing_cols:
+            raise ValueError(f"Columns not found in `data`: {missing_cols}")
 
-    return results
+    folds = cv.split(X=data)
+    if cv.return_all_indexes:
+        # NOTE: +1 to prevent iloc pandas from deleting the last observation
+        folds = [
+            [
+                fold[0],
+                [fold[1][0], fold[1][-1] + 1],
+                (
+                    [fold[2][0], fold[2][-1] + 1]
+                    if cv.window_size is not None
+                    else []
+                ),
+                [fold[3][0], fold[3][-1] + 1],
+                [fold[4][0], fold[4][-1] + 1],
+                fold[5],
+            ]
+            for fold in folds
+        ]
+
+    if colors is None:
+        colors = {
+            "train": "#329239",
+            "last_window": "#f7931a",
+            "gap": "#4d4d4d",
+            "test": "#0d579b",
+            "v_lines": "#252525",
+        }
+    else:
+        if not set(colors.keys()) >= {"train", "last_window", "gap", "test", "v_lines"}:
+            raise ValueError(
+                f"`colors` must contain the following keys: "
+                f"{['train', 'last_window', 'gap', 'test', 'v_lines']}"
+            )
+
+    y_values = data[series_to_plot].to_numpy().flatten()
+    y_min, y_max = np.nanmin(y_values), np.nanmax(y_values)
+
+    # Include some padding to y-axis limits
+    y_pad = 0.05 * (y_max - y_min if np.isfinite(y_max - y_min) and (y_max - y_min) > 0 else 1.0)
+    y_min_plot = (y_min - y_pad) if np.isfinite(y_min) else -1
+    y_max_plot = (y_max + y_pad) if np.isfinite(y_max) else 1
+
+    with plt.style.context(plt_style):
+        fig, ax = plt.subplots(figsize=figsize)
+
+        x_index = data.index
+
+        def _draw_fold(ax, fold, title: str):
+            ax.clear()
+
+            for col in series_to_plot:
+                ax.plot(
+                    x_index,
+                    data[col].to_numpy(),
+                    linewidth=1.5,
+                    alpha=0.9,
+                    label=col,
+                )
+
+            y_min_relative = (y_min - y_min_plot) / (y_max_plot - y_min_plot)
+            y_max_relative = (y_max - y_min_plot) / (y_max_plot - y_min_plot)
+
+            # Train
+            train_start, train_end = fold[1]
+            ax.axvspan(
+                x_index[train_start],
+                x_index[train_end],
+                y_min_relative,
+                y_max_relative,
+                facecolor=colors["train"],
+                alpha=0.2 if plot_last_window else 0.4,
+                zorder=0,
+                label="Train",
+            )
+
+            # last_window
+            if plot_last_window:
+                if cv.window_size is None:
+                    warnings.warn(
+                        "Last window cannot be calculated because the `window_size` "
+                        "of the `cv` object is None.",
+                        IgnoredArgumentWarning
+                    )
+                else:
+                    last_window_start, last_window_end = fold[2]
+                    ax.axvspan(
+                        x_index[last_window_start],
+                        x_index[last_window_end],
+                        y_min_relative,
+                        y_max_relative,
+                        facecolor=colors["last_window"],
+                        alpha=0.4,
+                        zorder=0,
+                        label="Last window",
+                    )
+
+            # Gap (if exists)
+            gap_start = fold[3][0]
+            gap_end = fold[4][0]
+            if gap_start != gap_end:
+                ax.axvspan(
+                    x_index[gap_start],
+                    x_index[gap_end],
+                    y_min_relative,
+                    y_max_relative,
+                    facecolor="#bababa",
+                    alpha=0.9,
+                    zorder=0,
+                    label="Gap",
+                    hatch="////",
+                    edgecolor=colors["gap"], 
+                )
+
+            # Test
+            test_start, test_end = fold[4]
+            ax.axvspan(
+                x_index[test_start],
+                x_index[test_end - 1],
+                y_min_relative,
+                y_max_relative,
+                facecolor=colors["test"],
+                alpha=0.4,
+                zorder=0,
+                label="Test",
+            )
+
+            def vline(ax, i):
+                ax.axvline(
+                    x_index[i],
+                    ymin=y_min_relative,
+                    ymax=y_max_relative,
+                    lw=1,
+                    ls="--",
+                    alpha=0.5,
+                    color=colors["v_lines"],
+                )
+
+            vline(ax, train_end)
+            vline(ax, test_start)
+
+            ax.set_ylim(y_min_plot, y_max_plot)
+            ax.set_title(title)
+            ax.legend(loc="upper left")
+            ax.grid(True, alpha=0.8)
+
+        # --------- Animation functions ----------
+        def init():
+            # Draw the first fold as the initial state
+            _draw_fold(ax, folds[0], title=title_template.format(fold_num=1, refit=0))
+            return (ax,)
+
+        def update(i):
+            fold = folds[i]
+            fold_num = min(i + 1, len(folds) - n_extra)
+            refit = fold[5] if len(fold) > 4 else i
+            title = title_template.format(fold_num=fold_num, refit=refit)
+            _draw_fold(ax, fold, title=title)
+            return (ax,)
+
+        # --------- Construction and saving ----------
+        # Add extra folds for pause at the end
+        n_extra = 2
+        for i in range(n_extra):
+            folds.append(folds[-1])
+
+        ani = FuncAnimation(
+            fig,
+            update,
+            frames=len(folds),
+            init_func=init,
+            blit=False, 
+            repeat=False
+        )
+
+        # Save GIF
+        writer = PillowWriter(fps=max(1, int(fps)))
+        ani.save(Path(filename).with_suffix('.gif'), writer=writer, dpi=dpi)
+        plt.close(fig)
+
+    filename_path = os.path.join(os.getcwd(), filename)
+
+    return Path(filename_path)

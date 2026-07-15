@@ -14,9 +14,6 @@ Esta sección proporciona tutoriales esenciales para los usuarios que están com
 
 <i class="fa-solid fa-sitemap fa" style="font-size: 25px; color: #00cc99;"></i> [Forecasting con gradient boosting: XGBoost, LightGBM y CatBoost](https://www.cienciadedatos.net/documentos/py39-forecasting-series-temporales-con-skforecast-xgboost-lightgbm-catboost.html)
 
-<i class="fa-solid fa-diagram-project fa-rotate-90" style="font-size: 25px; color: #74C0FC;"></i> [Forecasting con XGBoost](https://www.cienciadedatos.net/documentos/py56-forecasting-series-temporales-con-xgboost.html)
-
-<i class="fa-solid fa-diagram-project fa-rotate-90" style="font-size: 25px; color: #76b644;"></i> [Forecasting con LightGBM](https://www.cienciadedatos.net/documentos/py58-forecasting-series-temporales-con-lightgbm.html)
 
 <i class="fa-brands fa-youtube" style="font-size: 25px; color: #c4302b;"></i> [Workshop predicción de series temporales con machine learning 
 Universidad de Deusto / Deustuko Unibertsitatea](https://youtu.be/MlktVhReO0E)
@@ -32,7 +29,7 @@ Estos tutoriales se centran en modelos globales y en el pronóstico de series m�
 
 <i class="fa-solid fa-stairs" style="font-size: 25px; color: #B197FC;"></i> [Modelos de Forecasting Globales III: Predecir mil series temporales con un único modelo](https://www.cienciadedatos.net/documentos/py59-modelos-forecasting-escalables.html)
 
-<i class="fa-brabs fa-kaggle" style="font-size: 25px; color:rgb(230, 12, 12);"></i> [Modelos de Forecasting Globales IV: Guia paso a paso con Kaggle sticker sales](https://cienciadedatos.net/documentos/py66-forecasting-sticker-sales-kaggle-es.html)
+<i class="fa-brands fa-kaggle" style="font-size: 25px; color:rgb(230, 12, 12);"></i> [Modelos de Forecasting Globales IV: Guia paso a paso con Kaggle sticker sales](https://cienciadedatos.net/documentos/py66-forecasting-sticker-sales-kaggle-es.html)
 
 <i class="fa-solid fa-layer-group" style="font-size: 25px; color: #001633;"></i> [Forecasting con Deep Learning](https://cienciadedatos.net/documentos/py54-forecasting-con-deep-learning)
 
@@ -43,9 +40,9 @@ Estos tutoriales se centran en modelos globales y en el pronóstico de series m�
 
 Para usuarios experimentados que buscan profundizar en sus habilidades de forecasting, esta sección ofrece técnicas avanzadas, como forecasting probabilístico y manejo de valores ausentes.
 
-<i class="fa-light fa-chart-line fa" style="font-size: 25px; color: #f26e1d;"></i>  [Forecasting probabilístico](https://cienciadedatos.net/documentos/py42-forecasting-probabilistico.html)
+<i class="fa-solid fa-microchip" style="font-size: 25px; color: teal;"></i>  [Forecasting con modelos fundacionales](https://cienciadedatos.net/documentos/py79-forecasting-con-modelos-fundacionales.html)
 
-<i class="fa-light fa-chart-line fa" style="font-size: 25px; color:rgb(128, 29, 242);"></i>  [Forecasting probabilístico: intervalos de predicción para forecasting multi-step](https://cienciadedatos.net/documentos/py60-forecasting-probabilistico-intervalos-prediccion-forecasting-multi-step.html)
+<i class="fa-light fa-chart-line fa" style="font-size: 25px; color: #f26e1d;"></i>  [Forecasting probabilístico con machine learning](https://cienciadedatos.net/documentos/py42-forecasting-probabilistico.html)
 
 <i class="fa-solid fa-tree" style="font-size: 25px; color:rgb(7, 104, 84);"></i> [Modelar series temporales con tendencia utilizando modelos de árboles](https://cienciadedatos.net/documentos/py49-modelar-tendencia-en-series-temporales-modelos-de-arboles.html)
 
@@ -58,6 +55,10 @@ Para usuarios experimentados que buscan profundizar en sus habilidades de foreca
 <i class="fa-solid fa-ghost" style="font-size: 25px; color: #2f5ee9;"></i> [Detección de anomalías en series temporales](https://cienciadedatos.net/documentos/py62-deteccion-anomalias-series-temporales.html)
 
 <i class="fa-solid fa-lock-open" style="font-size: 25px; color: #e70d44;"></i> [Data leakage en modelos de forecasting preentrenados](https://cienciadedatos.net/documentos/py63-data-leakage-modelos-forecasting-preentrenados.html)
+
+<i class="fa-solid fa-diagram-project fa-rotate-90" style="font-size: 25px; color: #74C0FC;"></i> [Forecasting con XGBoost](https://www.cienciadedatos.net/documentos/py56-forecasting-series-temporales-con-xgboost.html)
+
+<i class="fa-solid fa-diagram-project fa-rotate-90" style="font-size: 25px; color: #76b644;"></i> [Forecasting con LightGBM](https://www.cienciadedatos.net/documentos/py58-forecasting-series-temporales-con-lightgbm.html)
 
 
 ## Desafíos del Mundo Real y Estudios de Caso

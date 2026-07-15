@@ -18,9 +18,9 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import HistGradientBoostingRegressor
 from lightgbm import LGBMRegressor
 
-from skforecast.preprocessing import RollingFeatures
-from skforecast.preprocessing import TimeSeriesDifferentiator
+from skforecast.preprocessing import RollingFeatures, TimeSeriesDifferentiator, CalendarFeatures
 from skforecast.direct import ForecasterDirectMultiVariate
+from skforecast.exceptions import MissingValuesWarning
 
 # Fixtures
 from .fixtures_forecaster_direct_multivariate import series
@@ -37,14 +37,56 @@ transformer_exog = ColumnTransformer(
                    )
 
 
+@pytest.mark.parametrize(
+    "forecaster_kwargs",
+    [
+        {"estimator": LinearRegression(), "level": "l1", "lags": 3, "steps": 2},
+        {"estimator": LinearRegression(), "level": "l1", "lags": 3, "steps": 2,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=3)},
+        {"estimator": LinearRegression(), "level": "l1", "lags": 3, "steps": 2,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=3),
+         "transformer_series": StandardScaler(), "transformer_exog": StandardScaler()},
+        {"estimator": LinearRegression(), "level": "l1", "lags": 3, "steps": 2,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=3),
+         "transformer_series": StandardScaler(), "transformer_exog": StandardScaler(),
+         "differentiation": 1},
+    ],
+    ids=["base", "window_features", "transformers", "differentiation"]
+)
+def test_predict_does_not_modify_series_exog(forecaster_kwargs):
+    """
+    Test forecaster.predict does not modify series, exog, exog_predict or
+    last_window.
+    """
+    series_local = series.copy()
+    exog_local = exog[['exog_1']].copy()
+    exog_predict_local = exog_predict[['exog_1']].copy()
+    last_window_local = series_local.iloc[-4:].copy()
+
+    series_copy = series_local.copy()
+    exog_copy = exog_local.copy()
+    exog_predict_copy = exog_predict_local.copy()
+    last_window_copy = last_window_local.copy()
+
+    forecaster = ForecasterDirectMultiVariate(**forecaster_kwargs)
+    forecaster.fit(series=series_local, exog=exog_local)
+    _ = forecaster.predict(steps=2, exog=exog_predict_local, last_window=last_window_local)
+
+    pd.testing.assert_frame_equal(series_local, series_copy)
+    pd.testing.assert_frame_equal(exog_local, exog_copy)
+    pd.testing.assert_frame_equal(last_window_local, last_window_copy)
+    pd.testing.assert_frame_equal(exog_predict_local, exog_predict_copy)
+
+
 @pytest.mark.parametrize("steps", [[1, 2.0, 3], [1, 4.]], 
                          ids=lambda steps: f'steps: {steps}')
 def test_predict_TypeError_when_steps_list_contain_floats(steps):
     """
     Test predict TypeError when steps is a list with floats.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
     forecaster.fit(series=series)
 
     err_msg = re.escape(
@@ -59,8 +101,9 @@ def test_predict_NotFittedError_when_fitted_is_False():
     """
     Test NotFittedError is raised when fitted is False.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
 
     err_msg = re.escape(
         "This Forecaster instance is not fitted yet. Call `fit` with "
@@ -72,12 +115,13 @@ def test_predict_NotFittedError_when_fitted_is_False():
 
 @pytest.mark.parametrize("steps", [3, [1, 2, 3], None], 
                          ids=lambda steps: f'steps: {steps}')
-def test_predict_output_when_regressor_is_LinearRegression(steps):
+def test_predict_output_when_estimator_is_LinearRegression(steps):
     """
-    Test predict output when using LinearRegression as regressor.
+    Test predict output when using LinearRegression as estimator.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
     forecaster.fit(series=series)
     results = forecaster.predict(steps=steps)
     expected = pd.DataFrame(
@@ -90,13 +134,14 @@ def test_predict_output_when_regressor_is_LinearRegression(steps):
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_list_interspersed():
+def test_predict_output_when_with_list_interspersed():
     """
-    Test predict output when using LinearRegression as regressor and steps is
+    Test predict output when using LinearRegression as estimator and steps is
     a list with interspersed steps.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l2',
-                                               lags=3, steps=5)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l2', lags=3, steps=5
+    )
     forecaster.fit(series=series)
     results = forecaster.predict(steps=[1, 4])
     expected = pd.DataFrame(
@@ -109,13 +154,14 @@ def test_predict_output_when_regressor_is_LinearRegression_with_list_intersperse
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_different_lags():
+def test_predict_output_when_with_different_lags():
     """
-    Test predict output when using LinearRegression as regressor and different
+    Test predict output when using LinearRegression as estimator and different
     lags configuration for each series.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l2',
-                                               lags={'l1': 5, 'l2': [1, 7]}, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l2', lags={'l1': 5, 'l2': [1, 7]}, steps=3
+    )
     forecaster.fit(series=series)
     results = forecaster.predict(steps=3)
     expected = pd.DataFrame(
@@ -128,13 +174,14 @@ def test_predict_output_when_regressor_is_LinearRegression_with_different_lags()
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_lags_dict_with_None_in_level_lags():
+def test_predict_output_when_with_lags_dict_with_None_in_level_lags():
     """
-    Test predict output when using LinearRegression as regressor when lags is a 
+    Test predict output when using LinearRegression as estimator when lags is a 
     dict and level has None lags configuration.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l2',
-                                               lags={'l1': 5, 'l2': None}, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l2', lags={'l1': 5, 'l2': None}, steps=3
+    )
     forecaster.fit(series=series)
     results = forecaster.predict(steps=3)
     expected = pd.DataFrame(
@@ -147,13 +194,14 @@ def test_predict_output_when_regressor_is_LinearRegression_with_lags_dict_with_N
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_lags_dict_with_None_but_no_in_level():
+def test_predict_output_when_with_lags_dict_with_None_but_no_in_level():
     """
-    Test predict output when using LinearRegression as regressor when lags is a 
+    Test predict output when using LinearRegression as estimator when lags is a 
     dict with None values.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags={'l1': 5, 'l2': None}, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags={'l1': 5, 'l2': None}, steps=3
+    )
     forecaster.fit(series=series)
     results = forecaster.predict(steps=3)
     expected = pd.DataFrame(
@@ -166,12 +214,13 @@ def test_predict_output_when_regressor_is_LinearRegression_with_lags_dict_with_N
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_using_last_window():
+def test_predict_output_when_using_last_window():
     """
-    Test predict output when using LinearRegression as regressor and last_window.
+    Test predict output when using LinearRegression as estimator and last_window.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
     forecaster.fit(series=series)
     last_window = pd.DataFrame(
                       data    = np.array([[0.98555979, 0.39887629],
@@ -191,12 +240,13 @@ def test_predict_output_when_regressor_is_LinearRegression_using_last_window():
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_using_exog():
+def test_predict_output_when_using_exog():
     """
-    Test predict output when using LinearRegression as regressor and exog.
+    Test predict output when using LinearRegression as estimator and exog.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
     forecaster.fit(series=series.iloc[:40,], exog=exog.iloc[:40, 0])
     results = forecaster.predict(steps=None, exog=exog.iloc[40:43, 0])
     expected = pd.DataFrame(
@@ -209,12 +259,12 @@ def test_predict_output_when_regressor_is_LinearRegression_using_exog():
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_transform_series():
+def test_predict_output_when_with_transform_series():
     """
-    Test predict output when using LinearRegression as regressor and StandardScaler.
+    Test predict output when using LinearRegression as estimator and StandardScaler.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = 5,
                      steps              = 5,
@@ -232,13 +282,13 @@ def test_predict_output_when_regressor_is_LinearRegression_with_transform_series
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_transform_series_as_dict():
+def test_predict_output_when_with_transform_series_as_dict():
     """
-    Test predict output when using LinearRegression as regressor and transformer_series
+    Test predict output when using LinearRegression as estimator and transformer_series
     is a dict with 2 different transformers.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l2',
                      lags               = 5,
                      steps              = 5,
@@ -258,13 +308,13 @@ def test_predict_output_when_regressor_is_LinearRegression_with_transform_series
 
 @pytest.mark.parametrize("n_jobs", [1, -1, 'auto'], 
                          ids=lambda n_jobs: f'n_jobs: {n_jobs}')
-def test_predict_output_when_regressor_is_LinearRegression_with_transform_series_and_transform_exog(n_jobs):
+def test_predict_output_when_transform_series_and_transform_exog(n_jobs):
     """
-    Test predict output when using LinearRegression as regressor, StandardScaler
+    Test predict output when using LinearRegression as estimator, StandardScaler
     as transformer_series and transformer_exog as transformer_exog.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = 5,
                      steps              = 5,
@@ -284,9 +334,9 @@ def test_predict_output_when_regressor_is_LinearRegression_with_transform_series
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_and_weight_func():
+def test_predict_output_when_and_weight_func():
     """
-    Test predict output when using LinearRegression as regressor and custom_weights.
+    Test predict output when using LinearRegression as estimator and custom_weights.
     """
     def custom_weights(index):
         """
@@ -296,8 +346,9 @@ def test_predict_output_when_regressor_is_LinearRegression_and_weight_func():
 
         return weights
     
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3, weight_func=custom_weights)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3, weight_func=custom_weights
+    )
     forecaster.fit(series=series)
     results = forecaster.predict(steps=3)
     expected = pd.DataFrame(
@@ -310,9 +361,17 @@ def test_predict_output_when_regressor_is_LinearRegression_and_weight_func():
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_output_when_categorical_features_native_implementation_HistGradientBoostingRegressor():
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_predict_output_when_categorical_features_HistGradientBoostingRegressor(categorical_features):
     """
     Test predict output when using HistGradientBoostingRegressor and categorical variables.
+    Native implementation of categorical features in HistGradientBoostingRegressor
+    should return the same predictions as the one obtained when using the Forecaster 
+    to encode the categorical features.
     """
     df_exog = pd.DataFrame({'exog_1': exog['exog_1'],
                             'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
@@ -321,7 +380,7 @@ def test_predict_output_when_categorical_features_native_implementation_HistGrad
     exog_predict = df_exog.copy()
     exog_predict.index = pd.RangeIndex(start=50, stop=100)
 
-    categorical_features = df_exog.select_dtypes(exclude=[np.number]).columns.tolist()
+    cat_features = df_exog.select_dtypes(exclude=[np.number]).columns.tolist()
     transformer_exog = make_column_transformer(
                            (
                                OrdinalEncoder(
@@ -330,25 +389,55 @@ def test_predict_output_when_categorical_features_native_implementation_HistGrad
                                    unknown_value=-1,
                                    encoded_missing_value=-1
                                ),
-                               categorical_features
+                               cat_features
                            ),
                            remainder="passthrough",
                            verbose_feature_names_out=False,
                        ).set_output(transform="pandas")
     
+    # No categorical features managed by the forecaster.
+    # make_column_transformer reorders columns to ['exog_2', 'exog_3', 'exog_1']
+    # so categorical indices in X_train_step (10 lags + 3 exog) are [10, 11].
+    # HistGradientBoostingRegressor requires integer indices when X is numpy.
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = HistGradientBoostingRegressor(
-                                              categorical_features = categorical_features,
-                                              random_state         = 123
-                                          ),
-                     level              = 'l1',
-                     lags               = 5,
-                     steps              = 10,
-                     transformer_series = None,
-                     transformer_exog   = transformer_exog
+                     estimator             = HistGradientBoostingRegressor(
+                                                 categorical_features = [10, 11],
+                                                 random_state         = 123
+                                             ),
+                     level                 = 'l1',
+                     lags                  = 5,
+                     steps                 = 10,
+                     transformer_series    = None,
+                     transformer_exog      = transformer_exog,
+                     categorical_features  = None
                  )
     forecaster.fit(series=series, exog=df_exog)
+    assert forecaster.X_train_features_names_out_ == [
+        'l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+        'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+        'exog_2', 'exog_3', 'exog_1'
+    ]
     predictions = forecaster.predict(steps=10, exog=exog_predict)
+    
+    # Categorical features managed by the forecaster
+    forecaster_2 = ForecasterDirectMultiVariate(
+                       estimator             = HistGradientBoostingRegressor(
+                                                   random_state = 123
+                                               ),
+                       level                 = 'l1',
+                       lags                  = 5,
+                       steps                 = 10,
+                       transformer_series    = None,
+                       transformer_exog      = None,
+                       categorical_features  = categorical_features
+                   )
+    forecaster_2.fit(series=series, exog=df_exog)
+    assert forecaster_2.X_train_features_names_out_ == [
+        'l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+        'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+        'exog_1', 'exog_2', 'exog_3'
+    ]
+    predictions_2 = forecaster_2.predict(steps=10, exog=exog_predict)
 
     expected = pd.DataFrame(
                    data = np.array([0.50131059, 0.49276926, 0.47433929, 0.4668392 , 
@@ -360,20 +449,31 @@ def test_predict_output_when_categorical_features_native_implementation_HistGrad
     expected = expected_df_to_long_format(expected)
     
     pd.testing.assert_frame_equal(predictions, expected)
+    pd.testing.assert_frame_equal(predictions_2, expected)
 
 
-def test_predict_output_when_categorical_features_native_implementation_LGBMRegressor():
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_predict_output_when_categorical_features_LGBMRegressor(categorical_features):
     """
     Test predict output when using LGBMRegressor and categorical variables.
+    Native implementation of categorical features in LGBMRegressor
+    should return the same predictions as the one obtained when using the Forecaster 
+    to encode the categorical features.
     """
-    df_exog = pd.DataFrame({'exog_1': exog['exog_1'],
-                            'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
-                            'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)})
+    df_exog = pd.DataFrame(
+        {'exog_1': exog['exog_1'],
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
     
     exog_predict = df_exog.copy()
     exog_predict.index = pd.RangeIndex(start=50, stop=100)
 
-    categorical_features = df_exog.select_dtypes(exclude=[np.number]).columns.tolist()
+    cat_features = df_exog.select_dtypes(exclude=[np.number]).columns.tolist()
     transformer_exog = make_column_transformer(
                            (
                                OrdinalEncoder(
@@ -382,26 +482,52 @@ def test_predict_output_when_categorical_features_native_implementation_LGBMRegr
                                    unknown_value=-1,
                                    encoded_missing_value=-1
                                ),
-                               categorical_features
+                               cat_features
                            ),
                            remainder="passthrough",
                            verbose_feature_names_out=False,
                        ).set_output(transform="pandas")
     
+    # make_column_transformer reorders columns to ['exog_2', 'exog_3', 'exog_1']
+    # so categorical indices in X_train_step (10 lags + 3 exog) are [10, 11].
+    # LGBMRegressor requires integer indices when X is numpy.
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LGBMRegressor(random_state=123),
-                     level              = 'l1',
-                     lags               = 5,
-                     steps              = 10,
-                     transformer_series = None,
-                     transformer_exog   = transformer_exog,
-                     fit_kwargs         = {'categorical_feature': categorical_features}
+                     estimator            = LGBMRegressor(random_state=123, verbose=-1),
+                     level                = 'l1',
+                     lags                 = 5,
+                     steps                = 10,
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = None,
+                     fit_kwargs           = {'categorical_feature': [10, 11]}
                  )
     forecaster.fit(series=series, exog=df_exog)
+    assert forecaster.X_train_features_names_out_ == [
+        'l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+        'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+        'exog_2', 'exog_3', 'exog_1'
+    ]
     predictions = forecaster.predict(steps=10, exog=exog_predict)
+    
+    forecaster_2 = ForecasterDirectMultiVariate(
+                       estimator            = LGBMRegressor(random_state=123, verbose=-1),
+                       level                = 'l1',
+                       lags                 = 5,
+                       steps                = 10,
+                       transformer_series   = None,
+                       transformer_exog     = None,
+                       categorical_features = categorical_features
+                   )
+    forecaster_2.fit(series=series, exog=df_exog)
+    assert forecaster_2.X_train_features_names_out_ == [
+        'l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+        'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+        'exog_1', 'exog_2', 'exog_3'
+    ]
+    predictions_2 = forecaster_2.predict(steps=10, exog=exog_predict)
 
     expected = pd.DataFrame(
-                   data = np.array([0.50131059, 0.49276926, 0.47433929, 0.46683919,
+                   data = np.array([0.50131059, 0.49276926, 0.47433929, 0.46683919, 
                                     0.47754412, 0.47360906, 0.47749395, 0.48461923, 
                                     0.48686681, 0.50223394]),
                    index   = pd.RangeIndex(start=50, stop=60, step=1),
@@ -410,12 +536,21 @@ def test_predict_output_when_categorical_features_native_implementation_LGBMRegr
     expected = expected_df_to_long_format(expected)
     
     pd.testing.assert_frame_equal(predictions, expected)
+    pd.testing.assert_frame_equal(predictions_2, expected)
 
 
-def test_predict_output_when_categorical_features_native_implementation_LGBMRegressor_auto():
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_predict_output_when_categorical_features_LGBMRegressor_auto(categorical_features):
     """
     Test predict output when using LGBMRegressor and categorical variables with 
     categorical_features='auto'.
+    Native implementation of categorical features in LGBMRegressor
+    should return the same predictions as the one obtained when using the Forecaster 
+    to encode the categorical features.
     """
     df_exog = pd.DataFrame({'exog_1': exog['exog_1'],
                             'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
@@ -446,16 +581,29 @@ def test_predict_output_when_categorical_features_native_implementation_LGBMRegr
                        ).set_output(transform="pandas")
     
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LGBMRegressor(random_state=123),
-                     level              = 'l1',
-                     lags               = 5,
-                     steps              = 10,
-                     transformer_series = None,
-                     transformer_exog   = transformer_exog,
-                     fit_kwargs         = {'categorical_feature': 'auto'}
+                     estimator            = LGBMRegressor(random_state=123, verbose=-1),
+                     level                = 'l1',
+                     lags                 = 5,
+                     steps                = 10, 
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = None,
+                     fit_kwargs           = {'categorical_feature': 'auto'}
                  )
     forecaster.fit(series=series, exog=df_exog)
     predictions = forecaster.predict(steps=10, exog=exog_predict)
+    
+    forecaster_2 = ForecasterDirectMultiVariate(
+                       estimator            = LGBMRegressor(random_state=123, verbose=-1),
+                       level                = 'l1',
+                       lags                 = 5,
+                       steps                = 10,
+                       transformer_series   = None,
+                       transformer_exog     = None,
+                       categorical_features = categorical_features
+                   )
+    forecaster_2.fit(series=series, exog=df_exog)
+    predictions_2 = forecaster_2.predict(steps=10, exog=exog_predict)
 
     expected = pd.DataFrame(
                    data = np.array([0.50131059, 0.49276926, 0.47433929, 0.46683919,
@@ -467,11 +615,12 @@ def test_predict_output_when_categorical_features_native_implementation_LGBMRegr
     expected = expected_df_to_long_format(expected)
     
     pd.testing.assert_frame_equal(predictions, expected)
+    pd.testing.assert_frame_equal(predictions_2, expected)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differentiation_is_1_steps_1():
+def test_predict_output_when_with_exog_and_differentiation_is_1_steps_1():
     """
-    Test predict output when using LinearRegression as regressor and 
+    Test predict output when using LinearRegression as estimator and 
     differentiation=1 and steps=1.
     """
 
@@ -499,7 +648,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     end_train = '2003-03-01 23:59:00'
 
     forecaster_1 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=1, lags=15, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=1, lags=15, transformer_series=None
     )
     forecaster_1.fit(series=series_diff.loc[:end_train], exog=exog_diff.loc[:end_train])
     predictions_diff = forecaster_1.predict(exog=exog_diff.loc[end_train:])
@@ -512,7 +661,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     predictions_1 = expected_df_to_long_format(predictions_1)
 
     forecaster_2 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=1, lags=15, transformer_series=None, differentiation=1
+        estimator=LinearRegression(), level='l1', steps=1, lags=15, transformer_series=None, differentiation=1
     )
     forecaster_2.fit(series=series_2.loc[:end_train], exog=exog.loc[:end_train])
     predictions_2 = forecaster_2.predict(exog=exog.loc[end_train:])
@@ -520,9 +669,9 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     pd.testing.assert_frame_equal(predictions_1.asfreq('MS'), predictions_2)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differentiation_is_1_steps_10():
+def test_predict_output_when_with_exog_and_differentiation_is_1_steps_10():
     """
-    Test predict output when using LinearRegression as regressor and 
+    Test predict output when using LinearRegression as estimator and 
     differentiation=1 and steps=10.
     """
 
@@ -550,7 +699,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     end_train = '2003-03-01 23:59:00'
 
     forecaster_1 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=10, lags=15, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=10, lags=15, transformer_series=None
     )
     forecaster_1.fit(series=series_diff.loc[:end_train], exog=exog_diff.loc[:end_train])
     predictions_diff = forecaster_1.predict(exog=exog_diff.loc[end_train:])
@@ -563,7 +712,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     predictions_1 = expected_df_to_long_format(predictions_1)
 
     forecaster_2 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=10, lags=15, transformer_series=None, differentiation=1
+        estimator=LinearRegression(), level='l1', steps=10, lags=15, transformer_series=None, differentiation=1
     )
     forecaster_2.fit(series=series_dt.loc[:end_train], exog=exog_dt.loc[:end_train])
     predictions_2 = forecaster_2.predict(exog=exog_dt.loc[end_train:])
@@ -571,9 +720,9 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     pd.testing.assert_frame_equal(predictions_1.asfreq('MS'), predictions_2)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differentiation_is_2():
+def test_predict_output_when_with_exog_and_differentiation_is_2():
     """
-    Test predict output when using LinearRegression as regressor and differentiation=2.
+    Test predict output when using LinearRegression as estimator and differentiation=2.
     """
 
     arr = data.to_numpy(copy=True)
@@ -611,7 +760,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     end_train = '2003-03-01 23:59:00'
 
     forecaster_1 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=1, lags=15, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=1, lags=15, transformer_series=None
     )
     forecaster_1.fit(series=df_diff_2.loc[:end_train], exog=exog_diff_2.loc[:end_train])
     predictions_diff_2 = forecaster_1.predict(exog=exog_diff_2.loc[end_train:])
@@ -627,7 +776,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     predictions_1 = expected_df_to_long_format(predictions_1)
 
     forecaster_2 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=1, lags=15, 
+        estimator=LinearRegression(), level='l1', steps=1, lags=15, 
         transformer_series=None, differentiation=2
     )
     forecaster_2.fit(series=series_dt.loc[:end_train], exog=exog.loc[:end_train])
@@ -636,9 +785,9 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     pd.testing.assert_frame_equal(predictions_1.asfreq('MS'), predictions_2, check_names=False)
 
 
-def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differentiation_is_2_steps_10():
+def test_predict_output_when_with_exog_and_differentiation_is_2_steps_10():
     """
-    Test predict output when using LinearRegression as regressor and 
+    Test predict output when using LinearRegression as estimator and 
     differentiation=2 and steps=10.
     """
 
@@ -677,7 +826,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     end_train = '2003-03-01 23:59:00'
 
     forecaster_1 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=10, lags=15, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=10, lags=15, transformer_series=None
     )
     forecaster_1.fit(series=df_diff_2.loc[:end_train], exog=exog_diff_2.loc[:end_train])
     predictions_diff_2 = forecaster_1.predict(exog=exog_diff_2.loc[end_train:])
@@ -693,7 +842,7 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
     predictions_1 = expected_df_to_long_format(predictions_1)
 
     forecaster_2 = ForecasterDirectMultiVariate(
-        regressor=LinearRegression(), level='l1', steps=10, lags=15, 
+        estimator=LinearRegression(), level='l1', steps=10, lags=15, 
         transformer_series=None, differentiation=2
     )
     forecaster_2.fit(series=series_dt.loc[:end_train], exog=exog.loc[:end_train])
@@ -704,13 +853,13 @@ def test_predict_output_when_regressor_is_LinearRegression_with_exog_and_differe
 
 def test_predict_output_when_window_features_steps_1():
     """
-    Test output of predict when regressor is LGBMRegressor and window features
+    Test output of predict when estimator is LGBMRegressor and window features
     with steps=1.
     """
 
     rolling = RollingFeatures(stats=['mean', 'sum'], window_sizes=[3, 5])
     forecaster = ForecasterDirectMultiVariate(
-        regressor=LGBMRegressor(verbose=-1, random_state=123), level='l1', 
+        estimator=LGBMRegressor(verbose=-1, random_state=123), level='l1', 
         steps=1, lags=5, window_features=rolling
     )
     forecaster.fit(series=series, exog=exog['exog_1'])
@@ -728,13 +877,13 @@ def test_predict_output_when_window_features_steps_1():
 
 def test_predict_output_when_window_features_steps_10():
     """
-    Test output of predict when regressor is LGBMRegressor and window features
+    Test output of predict when estimator is LGBMRegressor and window features
     with steps=10.
     """
 
     rolling = RollingFeatures(stats=['mean', 'sum'], window_sizes=[3, 5])
     forecaster = ForecasterDirectMultiVariate(
-        regressor=LGBMRegressor(verbose=-1, random_state=123), level='l1', 
+        estimator=LGBMRegressor(verbose=-1, random_state=123), level='l1', 
         steps=10, lags=15, window_features=rolling
     )
     forecaster.fit(series=series, exog=exog['exog_1'])
@@ -757,3 +906,146 @@ def test_predict_output_when_window_features_steps_10():
     expected = expected_df_to_long_format(expected)
     
     pd.testing.assert_frame_equal(predictions, expected)
+
+
+def test_predict_output_when_last_window_stored_has_NaN():
+    """
+    Test predict output when the stored last_window_ contains NaN values
+    because the original series had NaN near the end. Estimator:
+    HistGradientBoostingRegressor (supports NaN natively).
+    """
+    series_nan = pd.DataFrame(
+        {'l1': [1., 2., 3., 4., 5., 6., 7., np.nan, 9., 10.],
+         'l2': np.arange(50, 60, dtype=float)},
+        index=pd.RangeIndex(start=0, stop=10),
+    )
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator          = HistGradientBoostingRegressor(random_state=123),
+                     level              = 'l1',
+                     lags               = 3,
+                     steps              = 2,
+                     transformer_series = None,
+                     dropna_from_series = True
+                 )
+
+    warn_msg = re.escape(
+        "NaNs detected in `X_train`. They have been dropped. If "
+        "you want to keep them, set `forecaster.dropna_from_series = False`. "
+        "Same rows have been removed from `y_train` to maintain alignment. "
+        "This is caused by interspersed NaNs in `series` or `exog`."
+    )
+    with pytest.warns(MissingValuesWarning, match=warn_msg):
+        forecaster.fit(series=series_nan)
+
+    assert forecaster.last_window_.isna().any().any()
+
+    warn_msg = re.escape(
+        "`last_window` has missing values."
+    )
+    with pytest.warns(MissingValuesWarning, match=warn_msg):
+        predictions = forecaster.predict(steps=2)
+
+    expected = pd.DataFrame(
+                   data    = {'level': ['l1', 'l1'],
+                              'pred': np.array([5.5, 6.75])},
+                   index   = pd.RangeIndex(start=10, stop=12, step=1),
+               )
+
+    pd.testing.assert_frame_equal(predictions, expected)
+
+
+def test_predict_output_when_last_window_argument_has_NaN():
+    """
+    Test predict output when a custom last_window with NaN values is passed
+    to the predict method. Estimator: HistGradientBoostingRegressor.
+    """
+    series_clean = pd.DataFrame(
+        {'l1': np.arange(1., 21.),
+         'l2': np.arange(50., 70.)},
+        index=pd.RangeIndex(start=0, stop=20),
+    )
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator          = HistGradientBoostingRegressor(random_state=123),
+                     level              = 'l1',
+                     lags               = 3,
+                     steps              = 2,
+                     transformer_series = None,
+                     dropna_from_series = False
+                 )
+    forecaster.fit(series=series_clean)
+
+    last_window_nan = pd.DataFrame(
+        {'l1': [np.nan, 19., 20.],
+         'l2': [67., 68., 69.]},
+        index=pd.RangeIndex(start=17, stop=20),
+    )
+
+    warn_msg = re.escape(
+        "`last_window` has missing values."
+    )
+    with pytest.warns(MissingValuesWarning, match=warn_msg):
+        predictions = forecaster.predict(steps=2, last_window=last_window_nan)
+
+    expected = pd.DataFrame(
+                   data    = {'level': ['l1', 'l1'],
+                              'pred': np.array([11.5, 12.5])},
+                   index   = pd.RangeIndex(start=20, stop=22, step=1),
+               )
+
+    pd.testing.assert_frame_equal(predictions, expected)
+
+
+def test_predict_with_exog_window_features_and_calendar():
+    """
+    Test predict output with exogenous, window features and calendar features
+    is the same as when not using calendar_features argument and including
+    calendar features in the exogenous dataframe.
+    """
+    series_dt = pd.DataFrame(
+        {'l1': series['l1'].values,
+         'l2': series['l2'].values},
+        index=pd.date_range(start='2020-01-01', periods=len(series), freq='D')
+    )
+    exog_dt = pd.Series(
+        exog['exog_1'].values, index=series_dt.index, name='exog_1'
+    )
+    exog_predict_dt = pd.Series(
+        exog_predict['exog_1'].values[:10],
+        index=pd.date_range(start='2020-02-20', periods=10, freq='D'),
+        name='exog_1'
+    )
+
+    exog_calendar = exog_dt.to_frame()
+    exog_calendar['day_of_week'] = exog_calendar.index.dayofweek
+    exog_calendar['weekend'] = exog_calendar['day_of_week'].isin([5, 6]).astype(int)
+    exog_predict_calendar = exog_predict_dt.to_frame()
+    exog_predict_calendar['day_of_week'] = exog_predict_calendar.index.dayofweek
+    exog_predict_calendar['weekend'] = (
+        exog_predict_calendar['day_of_week'].isin([5, 6]).astype(int)
+    )
+
+    rolling = RollingFeatures(stats=['mean', 'std'], window_sizes=4)
+    calendar = CalendarFeatures(features=['day_of_week', 'weekend'], encoding=None)
+
+    forecaster = ForecasterDirectMultiVariate(
+        LGBMRegressor(verbose=-1, random_state=123),
+        level='l1',
+        steps=10,
+        lags=3,
+        window_features=rolling,
+        calendar_features=calendar
+    )
+    forecaster.fit(series=series_dt, exog=exog_dt)
+    predictions = forecaster.predict(steps=10, exog=exog_predict_dt)
+
+    forecaster_no_cal = ForecasterDirectMultiVariate(
+        LGBMRegressor(verbose=-1, random_state=123),
+        level='l1',
+        steps=10,
+        lags=3,
+        window_features=rolling
+    )
+    forecaster_no_cal.fit(series=series_dt, exog=exog_calendar)
+    predictions_no_cal = forecaster_no_cal.predict(steps=10, exog=exog_predict_calendar)
+
+    pd.testing.assert_frame_equal(predictions, predictions_no_cal)

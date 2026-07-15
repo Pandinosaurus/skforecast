@@ -5,14 +5,16 @@ import pytest
 import numpy as np
 import pandas as pd
 from sklearn.exceptions import NotFittedError
-from skforecast.recursive import ForecasterRecursive
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.compose import make_column_transformer
+from sklearn.compose import make_column_selector
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import HistGradientBoostingRegressor
+from skforecast.recursive import ForecasterRecursive
+from skforecast.preprocessing import TimeSeriesDifferentiator, CalendarFeatures
 
 # Fixtures
 from .fixtures_forecaster_recursive import y as y_categorical
@@ -25,24 +27,24 @@ def test_create_predict_inputs_NotFittedError_when_fitted_is_False():
     Test NotFittedError is raised when fitted is False.
     """
     forecaster = ForecasterRecursive(
-                     regressor = LinearRegression(),
+                     estimator = LinearRegression(),
                      lags      = 5
                  )
 
     err_msg = re.escape(
-        ("This Forecaster instance is not fitted yet. Call `fit` with "
-         "appropriate arguments before using predict.")
+        "This Forecaster instance is not fitted yet. Call `fit` with "
+        "appropriate arguments before using predict."
     )
     with pytest.raises(NotFittedError, match = err_msg):
         forecaster._create_predict_inputs(steps=5)
 
 
-def test_create_predict_inputs_when_regressor_is_LinearRegression():
+def test_create_predict_inputs_when_estimator_is_LinearRegression():
     """
-    Test _create_predict_inputs when using LinearRegression as regressor.
+    Test _create_predict_inputs when using LinearRegression as estimator.
     """
     forecaster = ForecasterRecursive(
-                     regressor = LinearRegression(),
+                     estimator = LinearRegression(),
                      lags      = 5
                  )
     forecaster.fit(y=pd.Series(np.arange(50, dtype=float), name='y'))
@@ -51,19 +53,23 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression():
     expected = (
         np.array([45., 46., 47., 48., 49.]),
         None,
+        None,
         pd.RangeIndex(start=50, stop=55, step=1),
-        5
+        5,
+        None
     )
     
     np.testing.assert_array_almost_equal(results[0], expected[0])
     assert results[1] is None
-    pd.testing.assert_index_equal(results[2], expected[2])
-    assert results[3] == expected[3]
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None
 
 
-def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform_y():
+def test_create_predict_inputs_when_with_transform_y():
     """
-    Test _create_predict_inputs when using LinearRegression as regressor and StandardScaler.
+    Test _create_predict_inputs when using LinearRegression as estimator and StandardScaler.
     """
     y = pd.Series(
             np.array([-0.59,  0.02, -0.9,  1.09, -3.61,  0.72, -0.11, -0.4,  0.49,
@@ -73,7 +79,7 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform
         )
 
     forecaster = ForecasterRecursive(
-                     regressor     = LinearRegression(),
+                     estimator     = LinearRegression(),
                      lags          = 5,
                      transformer_y = StandardScaler()
                  )
@@ -83,19 +89,23 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform
     expected = (
         np.array([-0.1056608, -0.30987914, -0.45194408, -0.28324197, -0.52297655]),
         None,
+        None,
         pd.RangeIndex(start=20, stop=25, step=1),
-        5
+        5,
+        None
     )
     
     np.testing.assert_array_almost_equal(results[0], expected[0])
     assert results[1] is None
-    pd.testing.assert_index_equal(results[2], expected[2])
-    assert results[3] == expected[3]
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None
 
 
-def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform_y_and_transform_exog_series():
+def test_create_predict_inputs_when_with_transform_y_and_transform_exog_series():
     """
-    Test _create_predict_inputs when using LinearRegression as regressor, StandardScaler
+    Test _create_predict_inputs when using LinearRegression as estimator, StandardScaler
     as transformer_y and StandardScaler as transformer_exog.
     """
     y = pd.Series(np.array([-0.59,  0.02, -0.9,  1.09, -3.61,  0.72, -0.11, -0.4]))
@@ -104,7 +114,7 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform
     exog_predict.index = pd.RangeIndex(start=8, stop=16)
 
     forecaster = ForecasterRecursive(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = 5,
                      transformer_y    = StandardScaler(),
                      transformer_exog = StandardScaler()
@@ -115,19 +125,23 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform
     expected = (
         np.array([1.16937289, -2.34810076, 0.89246539, 0.27129451, 0.0542589]),
         np.array([[-1.76425513], [-1.00989936], [0.59254869], [0.45863938], [0.1640389]]),
+        None,
         pd.RangeIndex(start=8, stop=13, step=1),
-        5
+        5,
+        None
     )
     
     np.testing.assert_array_almost_equal(results[0], expected[0])
     np.testing.assert_array_almost_equal(results[1], expected[1])
-    pd.testing.assert_index_equal(results[2], expected[2])
-    assert results[3] == expected[3]
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None
 
 
-def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform_y_and_transform_exog_df():
+def test_create_predict_inputs_when_with_transform_y_and_transform_exog_df():
     """
-    Test _create_predict_inputs when using LinearRegression as regressor, StandardScaler
+    Test _create_predict_inputs when using LinearRegression as estimator, StandardScaler
     as transformer_y and transformer_exog as transformer_exog.
     """
     y = pd.Series(
@@ -149,7 +163,7 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform
                        )
     
     forecaster = ForecasterRecursive(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = 5,
                      transformer_y    = transformer_y,
                      transformer_exog = transformer_exog
@@ -164,14 +178,18 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_transform
                   [ 0.59254869,  1.        ,  0.        ],
                   [ 0.45863938,  1.        ,  0.        ],
                   [ 0.1640389 ,  0.        ,  1.        ]]),
+        None,
         pd.RangeIndex(start=8, stop=13, step=1),
-        5
+        5,
+        None
     )
     
     np.testing.assert_array_almost_equal(results[0], expected[0])
     np.testing.assert_array_almost_equal(results[1], expected[1])
-    pd.testing.assert_index_equal(results[2], expected[2])
-    assert results[3] == expected[3]
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None
 
 
 def test_create_predict_inputs_when_categorical_features_native_implementation_HistGradientBoostingRegressor():
@@ -202,14 +220,19 @@ def test_create_predict_inputs_when_categorical_features_native_implementation_H
                            verbose_feature_names_out=False,
                        ).set_output(transform="pandas")
     
+    # No categorical features managed by the forecaster.
+    # make_column_transformer reorders columns to ['exog_2', 'exog_3', 'exog_1']
+    # so categorical indices in X_train_step (5 lags + 3 exog) are [5, 6].
+    # HistGradientBoostingRegressor requires integer indices when X is numpy.
     forecaster = ForecasterRecursive(
-                     regressor        = HistGradientBoostingRegressor(
-                                            categorical_features = categorical_features,
-                                            random_state         = 123
-                                        ),
-                     lags             = 5,
-                     transformer_y    = None,
-                     transformer_exog = transformer_exog
+                     estimator            = HistGradientBoostingRegressor(
+                                                categorical_features = [5, 6],
+                                                random_state         = 123
+                                            ),
+                     lags                 = 5,
+                     transformer_y        = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = None
                  )
     forecaster.fit(y=y_categorical, exog=df_exog)
     results = forecaster._create_predict_inputs(steps=10, exog=exog_predict)
@@ -226,19 +249,23 @@ def test_create_predict_inputs_when_categorical_features_native_implementation_H
                   [2.        , 2.        , 0.68130077],
                   [3.        , 3.        , 0.87545684],
                   [4.        , 4.        , 0.51042234]]),
+        None,
         pd.RangeIndex(start=50, stop=60, step=1),
-        10
+        10,
+        None
     )
     
     np.testing.assert_array_almost_equal(results[0], expected[0])
     np.testing.assert_array_almost_equal(results[1], expected[1])
-    pd.testing.assert_index_equal(results[2], expected[2])
-    assert results[3] == expected[3]
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None
 
 
-def test_create_predict_inputs_when_regressor_is_LinearRegression_with_exog_differentiation_is_1():
+def test_create_predict_inputs_when_with_exog_differentiation_is_1():
     """
-    Test _create_predict_inputs when using LinearRegression as regressor 
+    Test _create_predict_inputs when using LinearRegression as estimator 
     and differentiation=1.
     """
 
@@ -252,7 +279,7 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_exog_diff
     steps = data.index[-1]
 
     forecaster = ForecasterRecursive(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      lags            = 15,
                      differentiation = 1
                 )
@@ -283,11 +310,178 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_exog_diff
                   [-0.78148407], [-0.27354003], [-0.27128144], [-0.6389055 ], 
                   [ 0.19573233], [-0.67321672], [ 1.1559056 ]]
         ),
+        None,
         pd.date_range(start='2003-04-01', periods=63, freq='MS'),
         63
     )
     
     np.testing.assert_array_almost_equal(results[0], expected[0])
     np.testing.assert_array_almost_equal(results[1], expected[1])
-    pd.testing.assert_index_equal(results[2], expected[2])
-    assert results[3] == expected[3]
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert isinstance(results[5], TimeSeriesDifferentiator)
+    assert results[5] is not forecaster.differentiator
+
+
+def test_create_predict_inputs_does_not_mutate_differentiator():
+    """
+    Test that _create_predict_inputs does not mutate self.differentiator
+    when differentiation is used. The differentiator state after fit() should
+    remain unchanged after calling _create_predict_inputs.
+    """
+
+    end_train = '2003-03-01 23:59:00'
+
+    forecaster = ForecasterRecursive(
+                     estimator       = LinearRegression(),
+                     lags            = 15,
+                     differentiation = 1
+                 )
+    forecaster.fit(y=data.loc[:end_train])
+
+    # Store differentiator state after fit
+    last_values_after_fit = forecaster.differentiator.last_values.copy()
+    initial_values_after_fit = forecaster.differentiator.initial_values.copy()
+
+    # Call _create_predict_inputs (should NOT mutate self.differentiator)
+    forecaster._create_predict_inputs(steps=5)
+
+    # Verify differentiator state is unchanged
+    assert forecaster.differentiator.last_values == last_values_after_fit
+    assert forecaster.differentiator.initial_values == initial_values_after_fit
+
+
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_create_predict_inputs_when_categorical_features_auto_and_explicit_no_transformer_exog(
+    categorical_features,
+):
+    """
+    Test _create_predict_inputs when using internal categorical encoding
+    (`categorical_features='auto'` and explicit list) without `transformer_exog`.
+    This exercises the copy guard branch (`transformer_exog is None`).
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+
+    exog_predict = df_exog.copy()
+    exog_predict.index = pd.RangeIndex(start=50, stop=100)
+
+    forecaster = ForecasterRecursive(
+                     estimator             = LinearRegression(),
+                     lags                  = 5,
+                     transformer_y         = None,
+                     transformer_exog      = None,
+                     categorical_features  = categorical_features
+                 )
+    forecaster.fit(y=y_categorical, exog=df_exog)
+    results = forecaster._create_predict_inputs(steps=10, exog=exog_predict)
+
+    expected = (
+        np.array([0.25045537, 0.48303426, 0.98555979, 0.51948512, 0.61289453]),
+        np.array([[0.12062867, 0.        , 0.        ],
+                  [0.8263408 , 1.        , 1.        ],
+                  [0.60306013, 2.        , 2.        ],
+                  [0.54506801, 3.        , 3.        ],
+                  [0.34276383, 4.        , 4.        ],
+                  [0.30412079, 0.        , 0.        ],
+                  [0.41702221, 1.        , 1.        ],
+                  [0.68130077, 2.        , 2.        ],
+                  [0.87545684, 3.        , 3.        ],
+                  [0.51042234, 4.        , 4.        ]]),
+        None,
+        pd.RangeIndex(start=50, stop=60, step=1),
+        10,
+        None
+    )
+    
+    np.testing.assert_array_almost_equal(results[0], expected[0])
+    np.testing.assert_array_almost_equal(results[1], expected[1])
+    assert results[2] is None
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None
+
+
+def test_create_predict_inputs_when_calendar_and_categorical_features_auto_with_transformer_exog():
+    """
+    Test _create_predict_inputs when using internal categorical encoding
+    (`categorical_features='auto'`) together with `transformer_exog`
+    (StandardScaler on numeric columns). This exercises the branch where
+    copy is NOT needed because `transformer_exog` already returns a new
+    DataFrame.
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+    df_exog.index = pd.date_range(start='2000-01-01', periods=50, freq='D')
+
+    y_datetime = y_categorical.copy()
+    y_datetime.index = pd.date_range(start='2000-01-01', periods=50, freq='D')
+
+    exog_predict = df_exog.copy()
+    exog_predict.index = pd.date_range(start='2000-02-20', periods=50, freq='D')
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+
+    calendar = CalendarFeatures(
+        features=['day_of_week', 'weekend'], encoding="onehot"
+    )
+
+    forecaster = ForecasterRecursive(
+                     estimator             = LinearRegression(),
+                     lags                  = 5,
+                     transformer_y         = None,
+                     transformer_exog      = transformer_exog,
+                     categorical_features  = 'auto',
+                     calendar_features     = calendar
+                 )
+    forecaster.fit(y=y_datetime, exog=df_exog)
+    results = forecaster._create_predict_inputs(steps=10, exog=exog_predict)
+
+    expected = (
+        np.array([0.25045537, 0.48303426, 0.98555979, 0.51948512, 0.61289453]),
+        np.array([[-1.47636391, 0.        , 0.        ],
+                  [ 1.26277054, 1.        , 1.        ],
+                  [ 0.3961342 , 2.        , 2.        ],
+                  [ 0.17104495, 3.        , 3.        ],
+                  [-0.61417373, 4.        , 4.        ],
+                  [-0.76416192, 0.        , 0.        ],
+                  [-0.325949  , 1.        , 1.        ],
+                  [ 0.69981558, 2.        , 2.        ],
+                  [ 1.45340838, 3.        , 3.        ],
+                  [ 0.03657206, 4.        , 4.        ]]),
+        np.array([[1, 0, 0, 0, 0, 0, 0, 1],
+                  [0, 1, 0, 0, 0, 0, 0, 0],
+                  [0, 0, 1, 0, 0, 0, 0, 0],
+                  [0, 0, 0, 1, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 1, 0, 0, 0],
+                  [0, 0, 0, 0, 0, 1, 0, 0],
+                  [1, 0, 0, 0, 0, 0, 1, 0],
+                  [1, 0, 0, 0, 0, 0, 0, 1],
+                  [0, 1, 0, 0, 0, 0, 0, 0],
+                  [0, 0, 1, 0, 0, 0, 0, 0]]),
+        pd.date_range(start='2000-02-20', periods=10, freq='D'),
+        10,
+        None
+    )
+    
+    np.testing.assert_array_almost_equal(results[0], expected[0])
+    np.testing.assert_array_almost_equal(results[1], expected[1])
+    np.testing.assert_array_almost_equal(results[2], expected[2])
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] == expected[4]
+    assert results[5] is None

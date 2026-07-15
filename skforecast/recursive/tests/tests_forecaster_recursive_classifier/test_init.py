@@ -1,0 +1,190 @@
+# Unit test __init__ ForecasterRecursiveClassifier
+# ==============================================================================
+import re
+import pytest
+import numpy as np
+from lightgbm import LGBMClassifier
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.linear_model import LogisticRegression
+from skforecast.preprocessing import RollingFeaturesClassification
+from skforecast.recursive import ForecasterRecursiveClassifier
+
+
+def test_init_ValueError_when_features_encoding_not_valid():
+    """
+    Test ValueError is raised when `features_encoding` is not valid.
+    """
+    err_msg = re.escape(
+        "`features_encoding` must be one of ['auto', 'categorical', 'ordinal']. "
+        "Got 'not_valid'."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterRecursiveClassifier(
+            estimator         = LogisticRegression(),
+            lags              = 3,
+            features_encoding = 'not_valid'
+        )
+
+
+def test_init_ValueError_when_estimator_does_not_support_categorical_features():
+    """
+    Test ValueError is raised when `features_encoding='categorical'` and
+    the estimator does not support categorical features natively.
+    """
+    err_msg = re.escape(
+        f"`features_encoding='categorical'` requires a estimator that "
+        f"supports native categorical features (LightGBM, CatBoost, XGBoost). "
+        f"Got {type(LogisticRegression()).__name__}. Use 'auto' or 'ordinal' instead."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterRecursiveClassifier(
+            estimator         = LogisticRegression(),
+            lags              = 3,
+            features_encoding = 'categorical'
+        )
+
+
+def test_init_ValueError_when_no_lags_or_window_features():
+    """
+    Test ValueError is raised when no lags or window_features are passed.
+    """
+    err_msg = re.escape(
+        "At least one of the arguments `lags` or `window_features` "
+        "must be different from None. This is required to create the "
+        "predictors used in training the forecaster."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterRecursiveClassifier(
+            estimator       = LogisticRegression(),
+            lags            = None,
+            window_features = None
+        )
+
+
+@pytest.mark.parametrize("features_encoding, estimator, expected", 
+                         [('auto', LogisticRegression(), False), 
+                          ('auto', LGBMClassifier(verbose=-1), True), 
+                          ('categorical', LGBMClassifier(verbose=-1), True), 
+                          ('ordinal', LGBMClassifier(verbose=-1), False)], 
+                         ids = lambda dt: f'features_encoding, estimator, expected: {dt}')
+def test_init_use_native_categoricals_set(features_encoding, estimator, expected):
+    """
+    Test use_native_categoricals is correctly set during initialization.
+    """
+
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator         = estimator,
+                     lags              = 3,
+                     features_encoding = features_encoding
+                 )
+    
+    assert forecaster.use_native_categoricals == expected
+
+
+@pytest.mark.parametrize("lags, window_features, expected", 
+                         [(5, None, 5), 
+                          (None, True, 6), 
+                          ([], True, 6), 
+                          (5, True, 6)], 
+                         ids = lambda dt: f'lags, window_features, expected: {dt}')
+def test_init_window_size_correctly_stored(lags, window_features, expected):
+    """
+    Test window_size is correctly stored when lags or window_features are passed.
+    """
+    if window_features:
+        window_features = RollingFeaturesClassification(
+            stats=['proportion', 'mode'], window_sizes=[5, 6]
+        )
+
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator       = LogisticRegression(),
+                     lags            = lags,
+                     window_features = window_features
+                 )
+    
+    assert forecaster.window_size == expected
+    if lags:
+        np.testing.assert_array_almost_equal(forecaster.lags, np.array([1, 2, 3, 4, 5]))
+        assert forecaster.lags_names == [f'lag_{i}' for i in range(1, lags + 1)]
+        assert forecaster.max_lag == lags
+    else:
+        assert forecaster.lags is None
+        assert forecaster.lags_names is None
+        assert forecaster.max_lag is None
+    if window_features:
+        assert forecaster.window_features_names == ['roll_proportion_5', 'roll_mode_6']
+        assert forecaster.window_features_class_names == ['RollingFeaturesClassification']
+    else:
+        assert forecaster.window_features_names is None
+        assert forecaster.window_features_class_names is None
+
+
+@pytest.mark.parametrize("categorical_features", 
+                         [True, 5, 'not_auto'], 
+                         ids = lambda cf: f'categorical_features: {cf}')
+def test_init_ValueError_when_categorical_features_is_not_auto_list_or_None(categorical_features):
+    """
+    Test ValueError is raised when categorical_features is not 'auto', list, or None.
+    """
+    err_msg = re.escape(
+        f"Argument `categorical_features` must be `'auto'`, a list of "
+        f"column names, or `None`. Got {categorical_features}."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterRecursiveClassifier(
+            estimator            = LogisticRegression(),
+            lags                 = 5,
+            categorical_features = categorical_features
+        )
+
+
+def test_init_ValueError_when_categorical_features_is_empty_list():
+    """
+    Test ValueError is raised when categorical_features is an empty list.
+    """
+    err_msg = re.escape(
+        "Argument `categorical_features` must not be an empty list. "
+        "Use `None` to disable categorical encoding."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterRecursiveClassifier(
+            estimator            = LogisticRegression(),
+            lags                 = 5,
+            categorical_features = []
+        )
+
+
+@pytest.mark.parametrize("categorical_features", 
+                         ['auto', ['col_1', 'col_2'], None], 
+                         ids = lambda cf: f'categorical_features: {cf}')
+def test_init_categorical_features_correctly_stored(categorical_features):
+    """
+    Test categorical_features is correctly stored when 'auto', list, or None.
+    """
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator            = LogisticRegression(),
+                     lags                 = 5,
+                     categorical_features = categorical_features
+                 )
+    
+    assert forecaster.categorical_features == categorical_features
+    assert forecaster.categorical_features_names_in_ is None
+    assert isinstance(forecaster.categorical_encoder, OrdinalEncoder)
+
+
+@pytest.mark.parametrize(
+    'dropna_from_series',
+    [True, False],
+    ids=lambda d: f'dropna_from_series: {d}'
+)
+def test_init_dropna_from_series_attribute_correctly_stored(dropna_from_series):
+    """
+    Test dropna_from_series is correctly stored when True or False.
+    """
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator          = LogisticRegression(),
+                     lags               = 5,
+                     dropna_from_series = dropna_from_series
+                 )
+
+    assert forecaster.dropna_from_series == dropna_from_series

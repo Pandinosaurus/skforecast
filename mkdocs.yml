@@ -1,10 +1,8 @@
 site_name: Skforecast Docs
-extra_css:
-  - stylesheets/extra.css
 repo_url: https://github.com/skforecast/skforecast
 site_url: https://skforecast.org
 remote_branch: docs_dev
-site_description: Python library for time series forecasting using machine learning models. It works with any regressor compatible with the scikit-learn API, including popular options like LightGBM, XGBoost, CatBoost, Keras, and many others.
+site_description: Python library for time series forecasting using scikit-learn compatible models, statistical methods, and foundation models. It works with any estimator compatible with the scikit-learn API, including popular options like LightGBM, XGBoost, CatBoost, Keras, and many others.
 site_author: Joaquin Amat Rodrigo and Javier Escobar Ortiz
 use_directory_urls: false
 copyright: Copyright &copy; 2021 - 2030 Joaquín Amat Rodrigo, Javier Escobar Ortiz
@@ -20,28 +18,38 @@ nav:
     - Forecaster Parameters: quick-start/forecaster-parameters.md
     - Forecaster Attributes: quick-start/forecaster-attributes.ipynb
     - How to install: quick-start/how-to-install.md
+    - AI-assisted forecasting: quick-start/ai-assisted-forecasting.md
 
   - User Guides:
     - Table of contents: user_guides/table-of-contents.md
-    - Skforecast 0.14 Migration guide: user_guides/migration-guide.ipynb
+    - Skforecast Migration guide: user_guides/migration-guide.ipynb
     - Input data: user_guides/input-data.ipynb
     - Single series Forecasters:
-      - Recursive multi-step forecasting: user_guides/autoregresive-forecaster.ipynb
+      - Recursive multi-step forecasting: user_guides/autoregressive-forecaster.ipynb
       - Direct multi-step forecasting: user_guides/direct-multi-step-forecasting.ipynb
-      - ARIMA and SARIMAX forecasting: user_guides/forecasting-sarimax-arima.ipynb
       - Forecasting baseline: user_guides/forecasting-baseline.ipynb
+      - Autoregressive classification: user_guides/autoregressive-classification-forecasting.ipynb
     - Global Forecasters (multiple series):
       - Independent multi-time series forecasting: user_guides/independent-multi-time-series-forecasting.ipynb
       - Series with different lengths and different exogenous variables: user_guides/multi-series-with-different-length-and-different_exog.ipynb
       - Dependent multivariate series forecasting: user_guides/dependent-multi-series-multivariate-forecasting.ipynb
       - Deep learning Recurrent Neural Networks: user_guides/forecasting-with-deep-learning-rnn-lstm.ipynb
+    - Foundation Models:
+      - Forecasting with foundation models: user_guides/foundation-forecasting-models.ipynb
+    - Statistical Models:
+      - ForecasterStats: user_guides/forecasting-statistical-models.ipynb
+      - ARIMA, SARIMAX, AutoARIMA: user_guides/forecasting-sarimax-arima.ipynb
+      - ETS, AutoETS: user_guides/forecasting-ets.ipynb
+      - ARAR: user_guides/forecasting-arar.ipynb
     - Feature Engineering:
       - Exogenous variables: user_guides/exogenous-variables.ipynb
+      - Autocorrelation and lag selection: user_guides/autocorrelation-and-lag-selection.ipynb
       - Window and custom features: user_guides/window-features-and-custom-features.ipynb
       - Categorical features: user_guides/categorical-features.ipynb
-      - Calendars features: user_guides/calendar-features.ipynb
+      - Calendar features: user_guides/calendar-features.ipynb
       - Data transformation: user_guides/sklearn-transformers-and-pipeline.ipynb
       - Differentiation: user_guides/time-series-differentiation.ipynb
+      - Handling missing values: user_guides/handling-missing-values.ipynb
       - Feature selection: user_guides/feature-selection.ipynb
       - Sktime pipelines: user_guides/sktime-pipelines.ipynb
     - Model Evaluation and Tuning:
@@ -59,7 +67,8 @@ nav:
       - Metrics in probabilistic forecasting: user_guides/probabilistic-forecasting-metrics.ipynb
       - Continuous Ranked Probability Score (CRPS): faq/probabilistic-forecasting-crps-score.ipynb
     - Model Explainability: user_guides/explainability.ipynb
-    - Model deployment:
+    - Drift Detection: user_guides/drift-detection.ipynb
+    - Model Deployment:
       - Save and load forecaster: user_guides/save-load-forecaster.ipynb
       - Forecaster in production: user_guides/forecaster-in-production.ipynb
     - Plotting: user_guides/plotting.ipynb
@@ -79,31 +88,39 @@ nav:
       - Calibration of probabilistic forecasting intervals: faq/probabilistic-forecasting-calibrate-intervals.ipynb
       - Cyclical features in time series: faq/cyclical-features-time-series.ipynb
       - Time series aggregation: faq/time-series-aggregation.ipynb
+      - Benchmarking skforecast: faq/skforecast-benchmark.ipynb
       - Parallelization in skforecast: faq/parallelization-skforecast.ipynb
       - Profiling skforecast: faq/profiling-skforecast.ipynb
 
-  - Examples and tutorials:
+  - Examples:
     - English: examples/examples_english.md
     - Spanish: examples/examples_spanish.md
+    - Chinese (中文): examples/examples_chinese.md
 
   - API Reference:
     - recursive:
       - ForecasterRecursive: api/ForecasterRecursive.md
+      - ForecasterRecursiveClassifier: api/ForecasterRecursiveClassifier.md
       - ForecasterRecursiveMultiSeries: api/ForecasterRecursiveMultiSeries.md
-      - ForecasterSarimax: api/ForecasterSarimax.md
+      - ForecasterStats: api/ForecasterStats.md
       - ForecasterEquivalentDate: api/ForecasterEquivalentDate.md
     - direct:
       - ForecasterDirect: api/ForecasterDirect.md
       - ForecasterDirectMultiVariate: api/ForecasterDirectMultiVariate.md
+    - foundation:
+      - ForecasterFoundation: api/ForecasterFoundation.md
+      - FoundationModel: api/FoundationModel.md
     - deep_learning:
       - ForecasterRnn: api/ForecasterRnn.md
-    - sarimax: api/Sarimax.md
+    - stats: api/stats.md
     - model_selection: api/model_selection.md
     - feature_selection: api/feature_selection.md
     - preprocessing: api/preprocessing.md
+    - drift_detection: api/drift_detection.md
     - metrics: api/metrics.md
     - plot: api/plot.md
     - utils: api/utils.md
+    - experimental: api/experimental.md
     - datasets: api/datasets.md
     - exceptions: api/exceptions.md
 
@@ -117,8 +134,13 @@ nav:
     - Time series aggregation: faq/time-series-aggregation.ipynb
     - Continuous Ranked Probability Score (CRPS): faq/probabilistic-forecasting-crps-score.ipynb
     - Calibration of probabilistic forecasting intervals: faq/probabilistic-forecasting-calibrate-intervals.ipynb
+    - Benchmarking skforecast: faq/skforecast-benchmark.ipynb
     - Parallelization in skforecast: faq/parallelization-skforecast.ipynb
     - Profiling skforecast: faq/profiling-skforecast.ipynb
+
+  - Skforecast AI: skforecast-ai/skforecast-ai.md
+
+  - Skforecast Studio: skforecast-studio/skforecast-studio.md
 
   - Releases: releases/releases.md
 
@@ -127,34 +149,35 @@ nav:
     - Consulting & Professional services: more/consulting.md
     - Funding: more/funding.md
 
+extra_css:
+  - stylesheets/extra.css
+extra_javascript:
+  - javascripts/version-switcher.js
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
 plugins:
   # - git-revision-date-localized: Incluir última fecha de modificación al final de las páginas
   #     enable_creation_date: true
   - mkdocstrings:
       handlers:
         python:
-          import:
-            - https://docs.python.org/3/objects.inv
-            - https://mkdocstrings.github.io/autorefs/objects.inv
-            - https://www.mkdocs.org/objects.inv
-            - https://python-markdown.github.io/objects.inv
           options:
             docstring_style: numpy
             docstring_section_style: table
-            docstring_options:
-              ignore_init_summary: true
             filters: ["!__"] # exclude all members starting with __
             members_order: source
             merge_init_into_class: true
             separate_signature: true
+            show_source: true
             show_if_no_docstring: true
             show_root_full_path: true
             show_root_heading: true
             show_signature_annotations: false
             show_symbol_type_heading: false
             summary: true
-            extra:
-              render_references: true
+            group_by_category: true
+            show_category_heading: true
   - mkdocs-jupyter:
       allow_errors: False
       execute: False
@@ -162,14 +185,16 @@ plugins:
       include_requirejs: True
       include_source: True
   - mike:
-      alias_type: redirect
-      canonical_version: null
+      alias_type: copy
+      canonical_version: latest
       css_dir: css
       deploy_prefix: ''
       javascript_dir: js
       redirect_template: null
       version_selector: true
-  - search
+  - search:
+      lang: en
+      separator: '[\s\-\._]+'
 
 theme:
   name: material
@@ -181,12 +206,22 @@ theme:
     #- navigation.sections # To expand sections on the table of contents
     #- navigation.expand # To expand sections on the table of contents
     - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.instant.progress
     - toc.integrate
     - navigation.breadcrumbs
+    - content.code.copy
+    - content.code.annotate
+    - content.code.select
+    - content.tooltips
+    - search.suggest
+    - search.highlight
+    - search.share
   font:
     text: Open Sans
     code: Ubuntu Mono
-  highlightjs: true
   logo: img/logo-skforecast.png
   palette:
     # # Palette toggle for automatic mode
@@ -215,9 +250,7 @@ markdown_extensions:
   - abbr
   - admonition
   - attr_list
-  - codehilite
   - footnotes
-  - pymdownx.details
   - md_in_html
   - toc:
       permalink: true
@@ -235,17 +268,17 @@ markdown_extensions:
       linenums: false
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
   - pymdownx.keys
+  - pymdownx.magiclink
   - pymdownx.mark
   - pymdownx.smartsymbols
+  - pymdownx.snippets
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
   - pymdownx.tilde
-  - pymdownx.magiclink
   
 extra:
   version:
@@ -266,10 +299,6 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/skforecast/skforecast
     - icon: fontawesome/brands/discord
-      link: https://discord.gg/Bqqb6eJ9
+      link: https://discord.gg/3V52qpNkuj
     - icon: fontawesome/brands/creative-commons
       link: https://creativecommons.org/licenses/by-nc-sa/4.0/
-  seo:
-    description: >-
-      Skforecast is a Python library for time series forecasting using machine learning models. It works with any regressor compatible with the scikit-learn API, including popular options like LightGBM, XGBoost, CatBoost, Keras, and many others.
-    keywords: time series, forecasting, machine learning, python, data science, scikit-learn, lightgbm, xgboost, catboost, keras, probabilistic forecasting, multiple time series forecasting

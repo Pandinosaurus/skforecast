@@ -5,9 +5,7 @@ import os
 import pytest
 import numpy as np
 import pandas as pd
-import joblib
-from pathlib import Path
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, ElasticNet
 from lightgbm import LGBMRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.metrics import mean_squared_error
@@ -24,16 +22,65 @@ from skforecast.model_selection._search import _evaluate_grid_hyperparameters_mu
 from skforecast.model_selection._split import TimeSeriesFold, OneStepAheadFold
 
 # Fixtures
-from ..fixtures_model_selection_multiseries import series
-from ..fixtures_model_selection_multiseries import exog
+from ..fixtures_model_selection_multiseries import (
+    series_wide_range,
+    series_wide_dt,
+    series_long_dt,
+    series_dict_range,
+    series_dict_dt,
+    series_dict_nans,
+    exog,
+    exog_dict_nans
+)
 
 from tqdm import tqdm
 from functools import partialmethod
 tqdm.__init__ = partialmethod(tqdm.__init__, disable=True)  # hide progress bar
 
-THIS_DIR = Path(__file__).parent.parent
-series_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series.joblib')
-exog_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series_exog.joblib')
+pytestmark = [
+    pytest.mark.filterwarnings("ignore::skforecast.exceptions.MissingExogWarning"),
+    pytest.mark.filterwarnings("ignore::skforecast.exceptions.MissingValuesWarning"),
+]
+
+
+def test_ValueError_evaluate_grid_hyperparameters_multiseries_when_return_best_and_len_series_exog_different():
+    """
+    Test ValueError is raised in _evaluate_grid_hyperparameters_multiseries when 
+    `return_best = True` and length of `series` and `exog` do not match.
+    """
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator = Ridge(random_state=123),
+                     level     = 'l1',
+                     lags      = 2,
+                     steps     = 3
+                 )
+    exog = series_wide_range['l1'].copy().iloc[:30].rename('exog').copy()
+
+    cv = TimeSeriesFold(
+            initial_train_size = 12,
+            steps              = 4,
+            gap                = 0,
+            refit              = False,
+            fixed_train_size   = False,
+         )
+
+    err_msg = re.escape(
+        f"`exog` must have same number of samples as `series`. "
+        f"length `exog`: ({len(exog)}), length `series`: ({len(series_wide_range)})"
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        _evaluate_grid_hyperparameters_multiseries(
+            forecaster         = forecaster,
+            series             = series_wide_range,
+            exog               = exog,
+            cv                 = cv,
+            param_grid         = [{'alpha': 0.01}, {'alpha': 0.1}, {'alpha': 1}],
+            metric             = 'mean_absolute_error',
+            levels             = None,
+            lags_grid          = [2, 4],
+            return_best        = True,
+            verbose            = False
+        )
 
 
 def test_TypeError_evaluate_grid_hyperparameters_multiseries_when_cv_not_valid():
@@ -46,7 +93,7 @@ def test_TypeError_evaluate_grid_hyperparameters_multiseries_when_cv_not_valid()
 
     cv = DummyCV()
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 3,
                      encoding  = 'onehot'
                  )
@@ -58,45 +105,7 @@ def test_TypeError_evaluate_grid_hyperparameters_multiseries_when_cv_not_valid()
     with pytest.raises(TypeError, match = err_msg):
         _evaluate_grid_hyperparameters_multiseries(
             forecaster         = forecaster,
-            series             = series,
-            cv                 = cv,
-            param_grid         = [{'alpha': 0.01}, {'alpha': 0.1}, {'alpha': 1}],
-            metric             = 'mean_absolute_error',
-            levels             = None,
-            lags_grid          = [2, 4],
-            return_best        = True,
-            verbose            = False
-        )
-
-
-def test_ValueError_evaluate_grid_hyperparameters_multiseries_when_return_best_and_len_series_exog_different():
-    """
-    Test ValueError is raised in _evaluate_grid_hyperparameters_multiseries when 
-    `return_best = True` and length of `series` and `exog` do not match.
-    """
-    forecaster = ForecasterRecursiveMultiSeries(
-                     regressor = Ridge(random_state=123),
-                     lags      = 3,
-                     encoding  = 'onehot'
-                 )
-    exog = series.iloc[:30, 0]
-    cv = TimeSeriesFold(
-            initial_train_size = 12,
-            steps              = 4,
-            gap                = 0,
-            refit              = False,
-            fixed_train_size   = False,
-         )
-
-    err_msg = re.escape(
-        (f"`exog` must have same number of samples as `series`. "
-         f"length `exog`: ({len(exog)}), length `series`: ({len(series)})")
-    )
-    with pytest.raises(ValueError, match = err_msg):
-        _evaluate_grid_hyperparameters_multiseries(
-            forecaster         = forecaster,
-            series             = series,
-            exog               = exog,
+            series             = series_dict_range,
             cv                 = cv,
             param_grid         = [{'alpha': 0.01}, {'alpha': 0.1}, {'alpha': 1}],
             metric             = 'mean_absolute_error',
@@ -113,7 +122,7 @@ def test_ValueError_evaluate_grid_hyperparameters_multiseries_when_not_allowed_a
     `aggregate_metric` has not a valid value.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 3,
                      encoding  = 'onehot'
                  )
@@ -126,13 +135,13 @@ def test_ValueError_evaluate_grid_hyperparameters_multiseries_when_not_allowed_a
          )
 
     err_msg = re.escape(
-        ("Allowed `aggregate_metric` are: ['average', 'weighted_average', 'pooling']. "
-         "Got: ['not_valid'].")
+        "Allowed `aggregate_metric` are: ['average', 'weighted_average', 'pooling']. "
+        "Got: ['not_valid']."
     )
     with pytest.raises(ValueError, match = err_msg):
         _evaluate_grid_hyperparameters_multiseries(
             forecaster         = forecaster,
-            series             = series,
+            series             = series_dict_range,
             cv                 = cv,
             param_grid         = [{'alpha': 0.01}, {'alpha': 0.1}, {'alpha': 1}],
             metric             = 'mean_absolute_error',
@@ -150,7 +159,7 @@ def test_evaluate_grid_hyperparameters_multiseries_exception_when_metric_list_du
     metrics is used with duplicate names.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 3,
                      encoding  = 'onehot'
                  )
@@ -166,7 +175,7 @@ def test_evaluate_grid_hyperparameters_multiseries_exception_when_metric_list_du
     with pytest.raises(ValueError, match = err_msg):
         _evaluate_grid_hyperparameters_multiseries(
             forecaster         = forecaster,
-            series             = series,
+            series             = series_dict_range,
             cv                 = cv,
             param_grid         = [{'alpha': 0.01}, {'alpha': 0.1}, {'alpha': 1}],
             metric             = ['mean_absolute_error', mean_absolute_error],
@@ -186,13 +195,13 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
     with mocked (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -203,7 +212,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_dict_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -264,14 +273,14 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
         window_sizes=3,
     )
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      window_features    = window_features,
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -282,7 +291,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_dict_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -331,7 +340,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
     pd.testing.assert_frame_equal(results, expected_results)
 
 
-def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSeries_series_and_exog_dict_with_window_features():
+def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSeries_series_and_exog_dict_nans_with_window_features():
     """
     Test output of _evaluate_grid_hyperparameters_multiseries in 
     ForecasterRecursiveMultiSeries when series and exog are dicts with window features 
@@ -341,18 +350,18 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
         stats=['mean', 'std', 'min', 'max', 'sum', 'median', 'ratio_min_max', 'coef_variation'],
         window_sizes=3,
     )
-    regressor = LGBMRegressor(
+    estimator = LGBMRegressor(
         n_estimators=10, random_state=123, verbose=-1, max_depth=3
     )
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = regressor,
+                     estimator          = estimator,
                      lags               = 2, 
                      window_features    = window_features,
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = 38,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -366,8 +375,8 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series_dict,
-                  exog               = exog_dict,
+                  series             = series_dict_nans,
+                  exog               = exog_dict_nans,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -412,13 +421,13 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursiveMultiSeries_lag
     when `lags_grid` is a dict with mocked (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2,
                      encoding           = 'onehot', 
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_dt['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -429,7 +438,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursiveMultiSeries_lag
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_dict_dt,
                   cv                 = cv,
                   param_grid         = param_grid,
                   metric             = 'mean_absolute_error',
@@ -479,13 +488,13 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursiveMultiSeries_lag
     should use forecaster.lags as lags_grid.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -497,7 +506,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursiveMultiSeries_lag
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_long_dt,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = mean_absolute_error,
@@ -529,19 +538,19 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursiveMultiSeries_lag
 @pytest.mark.parametrize("levels", 
                          ['l1', ['l1']], 
                          ids = lambda value: f'levels: {value}')
-def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSeries_levels_str_list_with_mocked(levels):
+def test_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSeries_levels_str_list(levels):
     """
     Test output of _evaluate_grid_hyperparameters_multiseries in ForecasterRecursiveMultiSeries 
     with mocked when `levels` is a `str` or a `list` (mocked done in Skforecast v0.5.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -552,7 +561,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_long_dt,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -608,13 +617,13 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
     with mocked when multiple metrics (mocked done in Skforecast v0.6.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -625,7 +634,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_dict_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = [mean_squared_error, 'mean_absolute_error'],
@@ -694,13 +703,13 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterRe
     _evaluate_grid_hyperparameters_multiseries.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -710,7 +719,7 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterRe
 
     _evaluate_grid_hyperparameters_multiseries(
         forecaster         = forecaster,
-        series             = series,
+        series             = series_dict_range,
         param_grid         = param_grid,
         cv                 = cv,
         metric             = 'mean_absolute_error',
@@ -727,8 +736,8 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterRe
     expected_series_names_in_ = ['l1', 'l2']
     
     assert (expected_lags == forecaster.lags).all()
-    assert expected_alpha == forecaster.regressor.alpha
-    assert expected_series_names_in_ ==  forecaster.series_names_in_
+    assert expected_alpha == forecaster.estimator.alpha
+    assert expected_series_names_in_ == forecaster.series_names_in_
 
 
 def test_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSeries_output_file_single_level():
@@ -736,9 +745,11 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSerie
     Test output file is created when output_file is passed to
     _evaluate_grid_hyperparameters_multiseries and single level.
     """
-    forecaster = ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), lags=2)
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=Ridge(random_state=123), lags=2
+    )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -750,7 +761,7 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSerie
 
     results = _evaluate_grid_hyperparameters_multiseries(
         forecaster=forecaster,
-        series=series,
+        series=series_dict_range,
         param_grid=param_grid,
         cv=cv,
         metric="mean_absolute_error",
@@ -782,9 +793,9 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSerie
     Test output file is created when output_file is passed to
     _evaluate_grid_hyperparameters_multiseries and list of metrics.
     """
-    forecaster = ForecasterRecursiveMultiSeries(regressor=Ridge(random_state=123), lags=2)
+    forecaster = ForecasterRecursiveMultiSeries(estimator=Ridge(random_state=123), lags=2)
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -796,7 +807,7 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMultiSerie
 
     results = _evaluate_grid_hyperparameters_multiseries(
         forecaster=forecaster,
-        series=series,
+        series=series_dict_range,
         param_grid=param_grid,
         cv=cv,
         metric=[mean_squared_error, "mean_absolute_error"],
@@ -831,13 +842,13 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
     with mocked when multiple metrics (mocked done in Skforecast v0.6.0).
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      lags               = 2, 
                      encoding           = 'onehot',
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_dict_range['l1']) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -848,7 +859,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterRecursiveMul
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_dict_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = ['mean_absolute_error', 'mean_absolute_scaled_error'],
@@ -954,14 +965,14 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiV
     with mocked (mocked done in Skforecast v0.6.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -972,7 +983,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiV
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -1007,14 +1018,14 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
     when `lags_grid` is a dict with mocked (mocked done in Skforecast v0.6.0)
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1025,7 +1036,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -1061,14 +1072,14 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
     should use forecaster.lags as lags_grid.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1079,7 +1090,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = mean_absolute_error,
@@ -1110,14 +1121,14 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
     when `lags_grid` is a list of dicts with mocked (mocked done in Skforecast v0.6.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1128,7 +1139,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = mean_absolute_error,
@@ -1181,14 +1192,14 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
     when `lags_grid` is a dict of dicts with mocked (mocked done in Skforecast v0.6.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1206,7 +1217,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirectMultiVariate_lags_
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = mean_absolute_error,
@@ -1269,14 +1280,14 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiV
     with mocked when multiple metrics (mocked done in Skforecast v0.6.0).
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1287,7 +1298,7 @@ def test_output_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiV
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = [mean_squared_error, 'mean_absolute_error'],
@@ -1325,14 +1336,14 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterDi
     _evaluate_grid_hyperparameters_multiseries.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = Ridge(random_state=123),
+                     estimator          = Ridge(random_state=123),
                      level              = 'l1',
                      lags               = 2,
                      steps              = 3,
                      transformer_series = None
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1342,7 +1353,7 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterDi
 
     _evaluate_grid_hyperparameters_multiseries(
         forecaster         = forecaster,
-        series             = series,
+        series             = series_wide_range,
         param_grid         = param_grid,
         cv                 = cv,
         metric             = 'mean_absolute_error',
@@ -1351,7 +1362,7 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterDi
         exog               = None,
         lags_grid          = lags_grid,
         return_best        = True,
-        verbose            = False,
+        verbose            = True,
         show_progress      = False
     )
 
@@ -1360,9 +1371,9 @@ def test_evaluate_grid_hyperparameters_multiseries_when_return_best_ForecasterDi
     expected_series_names_in_ = ['l1', 'l2']
     
     assert (expected_lags == forecaster.lags).all()
-    for i in range(1, forecaster.steps + 1):
-        assert expected_alpha == forecaster.regressors_[i].alpha
-    assert expected_series_names_in_ ==  forecaster.series_names_in_
+    for i in forecaster.steps:
+        assert expected_alpha == forecaster.estimators_[i].alpha
+    assert expected_series_names_in_ == forecaster.series_names_in_
 
 
 def test_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiVariate_output_file_single_level():
@@ -1371,13 +1382,13 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiVariate_
     _evaluate_grid_hyperparameters_multiseries and single level.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      level     = 'l1',
                      lags      = 2,
                      steps     = 3
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1389,7 +1400,7 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiVariate_
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = 'mean_absolute_error',
@@ -1418,13 +1429,13 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiVariate_
     _evaluate_grid_hyperparameters_multiseries and list of metrics.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      level     = 'l2',
                      lags      = 2,
                      steps     = 3
                  )
     cv = TimeSeriesFold(
-            initial_train_size = len(series) - 12,
+            initial_train_size = len(series_wide_range) - 12,
             steps              = 3,
             gap                = 0,
             refit              = False,
@@ -1436,7 +1447,7 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiVariate_
 
     results = _evaluate_grid_hyperparameters_multiseries(
                   forecaster         = forecaster,
-                  series             = series,
+                  series             = series_wide_range,
                   param_grid         = param_grid,
                   cv                 = cv,
                   metric             = [mean_squared_error, 'mean_absolute_error'],
@@ -1464,20 +1475,20 @@ def test_evaluate_grid_hyperparameters_multiseries_ForecasterDirectMultiVariate_
         "forecaster",
         [
             ForecasterRecursiveMultiSeries(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 lags=3,
                 transformer_series=None,
                 forecaster_id='Multiseries_no_transformer'
             ),
             ForecasterRecursiveMultiSeries(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 lags=3,
                 transformer_series=StandardScaler(),
                 transformer_exog=StandardScaler(),
                 forecaster_id='Multiseries_transformer'
             ),
             ForecasterDirectMultiVariate(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 level='l1',
                 lags=3,
                 steps=1,
@@ -1495,10 +1506,16 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
     is equivalent when steps=1 and refit=False.
     Results are not equivalent if differentiation is included.
     """
-    series_datetime = series.copy()
-    series_datetime.index = pd.date_range(start='2024-01-01', periods=len(series), freq='D')
+    
+    if forecaster.forecaster_id == 'Multivariate':
+        series = series_wide_dt
+    else:
+        series = series_dict_dt
+
     exog_datetime = exog.copy()
-    exog_datetime.index = pd.date_range(start='2024-01-01', periods=len(exog), freq='D')
+    exog_datetime.index = pd.date_range(
+        start='2020-01-01', periods=len(exog), freq='D'
+    )
 
     metrics = [
         "mean_absolute_error",
@@ -1520,7 +1537,7 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
     param_grid = list(ParameterGrid(param_grid))
     results_backtesting = _evaluate_grid_hyperparameters_multiseries(
         forecaster         = forecaster,
-        series             = series_datetime,
+        series             = series,
         exog               = exog_datetime,
         cv                 = cv_backtesting,
         param_grid         = param_grid,
@@ -1535,7 +1552,7 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
     cv_one_step_ahead = OneStepAheadFold(initial_train_size = 20)
     results_one_step_ahead = _evaluate_grid_hyperparameters_multiseries(
         forecaster         = forecaster,
-        series             = series_datetime,
+        series             = series,
         exog               = exog_datetime,
         cv                 = cv_one_step_ahead,
         param_grid         = param_grid,
@@ -1557,13 +1574,13 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
         "forecaster",
         [
             ForecasterRecursiveMultiSeries(
-                regressor=LGBMRegressor(random_state=678, verbose=-1),
+                estimator=LGBMRegressor(random_state=678, verbose=-1),
                 lags=3,
                 transformer_series=None,
                 forecaster_id='Multiseries_no_transformer'
             ),
             ForecasterRecursiveMultiSeries(
-                regressor=LGBMRegressor(random_state=678, verbose=-1),
+                estimator=LGBMRegressor(random_state=678, verbose=-1),
                 lags=3,
                 transformer_series=StandardScaler(),
                 transformer_exog=StandardScaler(),
@@ -1571,7 +1588,7 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
             )
         ],
 ids=lambda forecaster: f'forecaster: {forecaster.forecaster_id}')
-def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_step_ahead_when_series_is_dict(
+def test_evaluate_grid_hyperparameters_same_output_backtesting_and_one_step_ahead_when_series_is_dict(
     initial_train_size, forecaster,
 ):
     """
@@ -1590,8 +1607,7 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
         root_mean_squared_scaled_error,
     ]
     param_grid = {
-        "n_estimators": [5, 10],
-        "max_depth": [2, 3]
+        "n_estimators": [5, 10, 15]
     }
     lags_grid = [3, 5]
     param_grid = list(ParameterGrid(param_grid))
@@ -1606,8 +1622,8 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
     
     results_backtesting = _evaluate_grid_hyperparameters_multiseries(
         forecaster         = forecaster,
-        series             = series_dict,
-        exog               = exog_dict,
+        series             = series_dict_nans,
+        exog               = exog_dict_nans,
         cv                 = cv_backtesting,
         param_grid         = param_grid,
         lags_grid          = lags_grid,
@@ -1626,8 +1642,8 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
     with pytest.warns(OneStepAheadValidationWarning, match = warn_msg):
         results_one_step_ahead = _evaluate_grid_hyperparameters_multiseries(
             forecaster         = forecaster,
-            series             = series_dict,
-            exog               = exog_dict,
+            series             = series_dict_nans,
+            exog               = exog_dict_nans,
             cv                 = cv_one_step_ahead,
             param_grid         = param_grid,
             lags_grid          = lags_grid,
@@ -1638,3 +1654,130 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_and_one_st
         )
 
     pd.testing.assert_frame_equal(results_backtesting, results_one_step_ahead)
+
+
+def test_evaluate_grid_hyperparameters_multiseries_warn_when_non_valid_params():
+    """
+    Test that a warning is raised when non valid params are included in param_grid.
+    """
+
+    param_grid = {
+        "alpha": [0.1],
+        "l1_ratio": [0.5, 10],  # 10 is not valid for ElasticNet
+    }
+    param_grid = list(ParameterGrid(param_grid))
+    cv = TimeSeriesFold(steps=12, initial_train_size=30, refit=False)
+    forecaster = ForecasterRecursiveMultiSeries(estimator=ElasticNet(), lags=5)
+
+    msg = re.escape(
+        "Parameters skipped: {'alpha': 0.1, 'l1_ratio': 10}. The 'l1_ratio' "
+        "parameter of ElasticNet must be a float in the range [0.0, 1.0]. "
+        "Got 10 instead."
+    )
+    with pytest.warns(RuntimeWarning, match=msg):
+        results = _evaluate_grid_hyperparameters_multiseries(
+            forecaster=forecaster,
+            series=series_dict_dt,
+            param_grid=param_grid,
+            cv=cv,
+            metric="mean_squared_error",
+            return_best=True,
+            n_jobs="auto",
+            verbose=True,
+            show_progress=False,
+        )
+
+    expected_results = pd.DataFrame(
+        {
+            "levels": {0: ["l1", "l2"]},
+            "lags": {0: np.array([1, 2, 3, 4, 5])},
+            "lags_label": {0: np.array([1, 2, 3, 4, 5])},
+            "params": {0: {"alpha": 0.1, "l1_ratio": 0.5}},
+            "mean_squared_error__weighted_average": {0: 0.06321861327736888},
+            "mean_squared_error__average": {0: 0.06321861327736888},
+            "mean_squared_error__pooling": {0: 0.06321861327736888},
+            "alpha": {0: 0.1},
+            "l1_ratio": {0: 0.5},
+        }
+    )
+    pd.testing.assert_frame_equal(results, expected_results)
+
+
+def test_evaluate_grid_hyperparameters_multiseries_warns_when_all_params_raise_exceptions():
+    """
+    Test that a RuntimeWarning is raised and an empty DataFrame is returned
+    when all parameter combinations in param_grid are invalid and raise
+    exceptions during evaluation (TimeSeriesFold).
+    """
+    # All l1_ratio values are invalid for ElasticNet (must be in [0.0, 1.0])
+    param_grid = [
+        {"alpha": 0.1, "l1_ratio": 10},
+        {"alpha": 0.5, "l1_ratio": 20},
+    ]
+    cv = TimeSeriesFold(steps=12, initial_train_size=30, refit=False)
+    forecaster = ForecasterRecursiveMultiSeries(estimator=ElasticNet(), lags=5)
+
+    warn_msg = re.escape(
+        "No valid parameter combinations found. All combinations raised exceptions."
+    )
+    with pytest.warns(RuntimeWarning, match=warn_msg):
+        results = _evaluate_grid_hyperparameters_multiseries(
+            forecaster    = forecaster,
+            series        = series_dict_dt,
+            param_grid    = param_grid,
+            cv            = cv,
+            metric        = "mean_squared_error",
+            return_best   = False,
+            n_jobs        = "auto",
+            verbose       = False,
+            show_progress = False,
+        )
+
+    assert results.empty
+    assert isinstance(results, pd.DataFrame)
+    expected_columns = [
+        'levels', 'lags', 'lags_label', 'params',
+        'mean_squared_error__weighted_average',
+        'mean_squared_error__average',
+        'mean_squared_error__pooling',
+    ]
+    assert list(results.columns) == expected_columns
+
+
+def test_evaluate_grid_hyperparameters_multiseries_warns_when_all_params_raise_exceptions_OneStepAheadFold():
+    """
+    Test that a RuntimeWarning is raised and an empty DataFrame is returned
+    when all parameter combinations raise exceptions with OneStepAheadFold
+    (multiseries).
+    """
+    param_grid = [
+        {"alpha": 0.1, "l1_ratio": 10},
+        {"alpha": 0.5, "l1_ratio": 20},
+    ]
+    cv = OneStepAheadFold(initial_train_size=30)
+    forecaster = ForecasterRecursiveMultiSeries(estimator=ElasticNet(), lags=5)
+
+    warn_msg = re.escape(
+        "No valid parameter combinations found. All combinations raised exceptions."
+    )
+    with pytest.warns(RuntimeWarning, match=warn_msg):
+        results = _evaluate_grid_hyperparameters_multiseries(
+            forecaster    = forecaster,
+            series        = series_dict_dt,
+            param_grid    = param_grid,
+            cv            = cv,
+            metric        = "mean_squared_error",
+            return_best   = False,
+            verbose       = False,
+            show_progress = False,
+        )
+
+    assert results.empty
+    assert isinstance(results, pd.DataFrame)
+    expected_columns = [
+        'levels', 'lags', 'lags_label', 'params',
+        'mean_squared_error__weighted_average',
+        'mean_squared_error__average',
+        'mean_squared_error__pooling',
+    ]
+    assert list(results.columns) == expected_columns

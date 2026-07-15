@@ -10,9 +10,10 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.compose import make_column_transformer
+from sklearn.compose import make_column_selector
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import HistGradientBoostingRegressor
-from skforecast.preprocessing import RollingFeatures
+from skforecast.preprocessing import RollingFeatures, TimeSeriesDifferentiator, CalendarFeatures
 from skforecast.direct import ForecasterDirect
 
 # Fixtures
@@ -27,12 +28,14 @@ def test_create_predict_inputs_TypeError_when_steps_list_contain_floats(steps):
     """
     Test _create_predict_inputs TypeError when steps is a list with floats.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(y=pd.Series(np.arange(10)))
 
     err_msg = re.escape(
-        (f"`steps` argument must be an int, a list of ints or `None`. "
-         f"Got {type(steps)}.")
+        f"`steps` argument must be an int, a list of ints or `None`. "
+        f"Got {type(steps)}."
     )
     with pytest.raises(TypeError, match = err_msg):
         forecaster._create_predict_inputs(steps=steps)
@@ -42,11 +45,13 @@ def test_create_predict_inputs_NotFittedError_when_fitted_is_False():
     """
     Test NotFittedError is raised when fitted is False.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
 
     err_msg = re.escape(
-        ("This Forecaster instance is not fitted yet. Call `fit` with "
-         "appropriate arguments before using predict.")
+        "This Forecaster instance is not fitted yet. Call `fit` with "
+        "appropriate arguments before using predict."
     )
     with pytest.raises(NotFittedError, match = err_msg):
         forecaster._create_predict_inputs(steps=5)
@@ -58,9 +63,14 @@ def test_create_predict_inputs_output(steps):
     """
     Test _create_predict_inputs output.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=3)
-    forecaster.fit(y=pd.Series(np.arange(50, dtype=float), 
-                   index=pd.date_range(start='2020-01-01', periods=50, freq='D')))
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=3
+    )
+    forecaster.fit(
+        y=pd.Series(
+            np.arange(50, dtype=float), index=pd.date_range(start='2020-01-01', periods=50, freq='D')
+        )
+    )
     results = forecaster._create_predict_inputs(steps=steps)
 
     expected = (
@@ -77,14 +87,17 @@ def test_create_predict_inputs_output(steps):
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
-def test_create_predict_inputs_output_when_regressor_is_LinearRegression_with_list_interspersed():
+def test_create_predict_inputs_output_when_with_list_interspersed():
     """
     Test _create_predict_inputs output when steps is
     a list with interspersed steps.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(y=pd.Series(np.arange(50, dtype=float)))
     results = forecaster._create_predict_inputs(steps=[1, 4])
 
@@ -101,13 +114,16 @@ def test_create_predict_inputs_output_when_regressor_is_LinearRegression_with_li
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
 def test_create_predict_inputs_output_when_last_window():
     """
     Test _create_predict_inputs output when external last_window.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(y=pd.Series(np.arange(50, dtype=float)))
     last_window = pd.Series(
         data  = [47, 48, 49], 
@@ -130,13 +146,16 @@ def test_create_predict_inputs_output_when_last_window():
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
 def test_create_predict_inputs_output_when_exog():
     """
     Test _create_predict_inputs output when exog.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(
         y=pd.Series(np.arange(50, dtype=float)),
         exog=pd.Series(np.arange(start=100, stop=150, step=1), name="exog")
@@ -164,6 +183,7 @@ def test_create_predict_inputs_output_when_exog():
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
 def test_create_predict_inputs_output_with_transform_y():
@@ -178,7 +198,7 @@ def test_create_predict_inputs_output_with_transform_y():
     transformer_y = StandardScaler()
 
     forecaster = ForecasterDirect(
-                     regressor     = LinearRegression(),
+                     estimator     = LinearRegression(),
                      lags          = 5,
                      steps         = 5,
                      transformer_y = transformer_y,
@@ -202,6 +222,7 @@ def test_create_predict_inputs_output_with_transform_y():
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
 @pytest.mark.parametrize("n_jobs", [1, -1, 'auto'], 
@@ -233,7 +254,7 @@ def test_create_predict_inputs_output_with_transform_y_and_transform_exog(n_jobs
                        )
     
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = 5,
                      steps            = 5,
                      transformer_y    = transformer_y,
@@ -264,6 +285,7 @@ def test_create_predict_inputs_output_with_transform_y_and_transform_exog(n_jobs
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
 def test_create_predict_inputs_output_when_categorical_features_native_implementation_HistGradientBoostingRegressor():
@@ -296,7 +318,7 @@ def test_create_predict_inputs_output_when_categorical_features_native_implement
                        ).set_output(transform="pandas")
     
     forecaster = ForecasterDirect(
-                     regressor        = HistGradientBoostingRegressor(
+                     estimator        = HistGradientBoostingRegressor(
                                             categorical_features = categorical_features,
                                             random_state         = 123
                                         ),
@@ -339,11 +361,12 @@ def test_create_predict_inputs_output_when_categorical_features_native_implement
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
-def test_create_predict_inputs_when_regressor_is_LinearRegression_with_exog_differentiation_is_1():
+def test_create_predict_inputs_when_with_exog_differentiation_is_1():
     """
-    Test _create_predict_inputs when using LinearRegression as regressor 
+    Test _create_predict_inputs when using LinearRegression as estimator 
     and differentiation=1.
     """
 
@@ -356,7 +379,7 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_exog_diff
     )
 
     forecaster = ForecasterDirect(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      steps           = 5,
                      lags            = 15,
                      differentiation = 1
@@ -396,6 +419,8 @@ def test_create_predict_inputs_when_regressor_is_LinearRegression_with_exog_diff
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert isinstance(results[4], TimeSeriesDifferentiator)
+    assert results[4] is not forecaster.differentiator
 
 
 def test_create_predict_inputs_output_window_features():
@@ -410,7 +435,7 @@ def test_create_predict_inputs_output_window_features():
         stats=['mean', 'median', 'sum'], window_sizes=[4, 5, 6]
     )
     forecaster = ForecasterDirect(
-        LinearRegression(), steps=3, lags=3, window_features=rolling
+        estimator=LinearRegression(), steps=3, lags=3, window_features=rolling
     )
     forecaster.fit(y=y_datetime)
     results = forecaster._create_predict_inputs()
@@ -429,6 +454,7 @@ def test_create_predict_inputs_output_window_features():
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
 def test_create_predict_inputs_output_with_2_window_features():
@@ -442,7 +468,7 @@ def test_create_predict_inputs_output_with_2_window_features():
     rolling = RollingFeatures(stats=['mean', 'median'], window_sizes=[4, 5])
     rolling_2 = RollingFeatures(stats=['sum'], window_sizes=6)
     forecaster = ForecasterDirect(
-        LinearRegression(), steps=3, lags=3, window_features=[rolling, rolling_2]
+        estimator=LinearRegression(), steps=3, lags=3, window_features=[rolling, rolling_2]
     )
     forecaster.fit(y=y_datetime)
     results = forecaster._create_predict_inputs()
@@ -461,11 +487,12 @@ def test_create_predict_inputs_output_with_2_window_features():
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
 
 
-def test_create_predict_inputs_output_window_features_and_no_lags():
+def test_create_predict_inputs_output_window_features_no_lags_and_calendar_features():
     """
-    Test _create_predict_inputs output with window_features and no lags.
+    Test _create_predict_inputs output with window_features, no lags and calendar_features.
     """
     y_datetime = pd.Series(
         np.arange(50), index=pd.date_range('2020-01-01', periods=50, freq='D'),
@@ -474,17 +501,20 @@ def test_create_predict_inputs_output_window_features_and_no_lags():
     rolling = RollingFeatures(
         stats=['mean', 'median', 'sum'], window_sizes=[4, 5, 6]
     )
+    calendar = CalendarFeatures(features=['day_of_week', 'weekend'], encoding=None)
+
     forecaster = ForecasterDirect(
-        LinearRegression(), steps=3, lags=None, window_features=rolling
+        estimator=LinearRegression(), steps=3, lags=None, 
+        window_features=rolling, calendar_features=calendar
     )
     forecaster.fit(y=y_datetime)
     results = forecaster._create_predict_inputs()
 
     expected = (
-        [np.array([[47.5, 47., 279.]]),
-         np.array([[47.5, 47., 279.]]),
-         np.array([[47.5, 47., 279.]])],
-        ['roll_mean_4', 'roll_median_5', 'roll_sum_6'],
+        [np.array([[47.5, 47., 279., 3., 0.]]),
+         np.array([[47.5, 47., 279., 4., 0.]]),
+         np.array([[47.5, 47., 279., 5., 1.]])],
+        ['roll_mean_4', 'roll_median_5', 'roll_sum_6', 'day_of_week', 'weekend'],
         [1, 2, 3],
         pd.date_range(start='2020-02-20', periods=3, freq='D')
     )
@@ -494,3 +524,227 @@ def test_create_predict_inputs_output_window_features_and_no_lags():
     assert results[1] == expected[1]
     assert results[2] == expected[2]
     pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
+
+
+def test_create_predict_inputs_does_not_mutate_differentiator():
+    """
+    Test that _create_predict_inputs does not mutate the forecaster's
+    differentiator when differentiation is applied.
+    """
+    end_train = '2003-03-01 23:59:00'
+
+    forecaster = ForecasterDirect(
+                     estimator       = LinearRegression(),
+                     steps           = 5,
+                     lags            = 15,
+                     differentiation = 1
+                )
+    forecaster.fit(y=data.loc[:end_train])
+
+    differentiator_initial_values = forecaster.differentiator.initial_values.copy()
+    differentiator_last_values = forecaster.differentiator.last_values.copy()
+
+    # Call _create_predict_inputs twice to verify no side effects
+    results_1 = forecaster._create_predict_inputs()
+    results_2 = forecaster._create_predict_inputs()
+
+    np.testing.assert_array_equal(
+        forecaster.differentiator.initial_values,
+        differentiator_initial_values
+    )
+    np.testing.assert_array_equal(
+        forecaster.differentiator.last_values,
+        differentiator_last_values
+    )
+    # Both calls should produce identical results
+    for step in range(len(results_1[0])):
+        np.testing.assert_almost_equal(results_1[0][step], results_2[0][step])
+
+
+def test_create_predict_inputs_output_with_transform_y_and_transform_exog_series():
+    """
+    Test _create_predict_inputs output when StandardScaler as transformer_y
+    and StandardScaler as transformer_exog with exog as Series.
+    """
+    y = pd.Series(
+            np.array([-0.59, 0.02, -0.9, 1.09, -3.61, 0.72, -0.11, -0.4])
+        )
+    exog = pd.Series(
+               np.array([7.5, 24.4, 60.3, 57.3, 50.7, 41.4, 87.2, 47.4]),
+               name='exog'
+           )
+    exog_predict = exog.copy()
+    exog_predict.index = pd.RangeIndex(start=8, stop=16)
+
+    forecaster = ForecasterDirect(
+                     estimator        = LinearRegression(),
+                     lags             = 3,
+                     steps            = 3,
+                     transformer_y    = StandardScaler(),
+                     transformer_exog = StandardScaler()
+                 )
+    forecaster.fit(y=y, exog=exog)
+    results = forecaster._create_predict_inputs(steps=3, exog=exog_predict)
+
+    expected = (
+        [np.array([[ 0.0542589 ,  0.27129451,  0.89246539, -1.76425513]]),
+         np.array([[ 0.0542589 ,  0.27129451,  0.89246539, -1.00989936]]),
+         np.array([[ 0.0542589 ,  0.27129451,  0.89246539,  0.59254869]])],
+        ['lag_1', 'lag_2', 'lag_3', 'exog'],
+        [1, 2, 3],
+        pd.RangeIndex(start=8, stop=11, step=1)
+    )
+
+    for step in range(len(expected[0])):
+        np.testing.assert_almost_equal(results[0][step], expected[0][step])
+    assert results[1] == expected[1]
+    assert results[2] == expected[2]
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
+
+
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_create_predict_inputs_when_categorical_features_auto_and_explicit_no_transformer_exog(
+    categorical_features,
+):
+    """
+    Test _create_predict_inputs when using internal categorical encoding
+    (`categorical_features='auto'` and explicit list) without `transformer_exog`.
+    This exercises the copy guard branch (`transformer_exog is None`).
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+
+    exog_predict = df_exog.copy()
+    exog_predict.index = pd.RangeIndex(start=50, stop=100)
+
+    forecaster = ForecasterDirect(
+                     estimator            = LinearRegression(),
+                     lags                 = 5,
+                     steps                = 10,
+                     transformer_y        = None,
+                     transformer_exog     = None,
+                     categorical_features = categorical_features
+                 )
+    forecaster.fit(y=y_categorical, exog=df_exog)
+    results = forecaster._create_predict_inputs(steps=10, exog=exog_predict)
+
+    expected = (
+        [np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.12062867, 0., 0.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.8263408, 1., 1.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.60306013, 2., 2.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.54506801, 3., 3.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.34276383, 4., 4.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.30412079, 0., 0.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.41702221, 1., 1.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.68130077, 2., 2.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.87545684, 3., 3.]]),
+         np.array([[0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                    0.51042234, 4., 4.]])],
+        ['lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_5', 'exog_1', 'exog_2', 'exog_3'],
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        pd.RangeIndex(start=50, stop=60, step=1)
+    )
+
+    for step in range(len(expected[0])):
+        np.testing.assert_almost_equal(results[0][step], expected[0][step])
+    assert results[1] == expected[1]
+    assert results[2] == expected[2]
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None
+
+
+def test_create_predict_inputs_when_calendar_and_categorical_features_auto_with_transformer_exog():
+    """
+    Test _create_predict_inputs when using internal categorical encoding
+    (`categorical_features='auto'`) together with `transformer_exog`
+    (StandardScaler on numeric columns). This exercises the branch where
+    copy is NOT needed because `transformer_exog` already returns a new
+    DataFrame.
+    """
+
+    y_categorical_dt = y_categorical.copy()
+    y_categorical_dt.index = pd.date_range(start='2020-01-01', periods=len(y_categorical), freq='D')
+    df_exog_dt = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+    df_exog_dt.index = pd.date_range(start='2020-01-01', periods=len(df_exog_dt), freq='D')
+
+    exog_predict_dt = df_exog_dt.copy()
+    exog_predict_dt.index = pd.date_range(start='2020-02-20', periods=len(exog_predict_dt), freq='D')
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+    
+    calendar = CalendarFeatures(
+        features=['day_of_week', 'weekend'], encoding="onehot"
+    )
+
+    forecaster = ForecasterDirect(
+                     estimator            = LinearRegression(),
+                     lags                 = 5,
+                     steps                = 10,
+                     calendar_features    = calendar,
+                     transformer_y        = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = 'auto'
+                 )
+    forecaster.fit(y=y_categorical_dt, exog=df_exog_dt)
+    results = forecaster._create_predict_inputs(steps=10, exog=exog_predict_dt)
+
+    expected = (
+        [np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                    -1.47636391,  0.,  0.,  0.,  0.,  0.,  0.,  1.,  0.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                     1.26277054,  1.,  1.,  0.,  0.,  0.,  0.,  0.,  1.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                     0.3961342,   2.,  2.,  1.,  0.,  0.,  0.,  0.,  0.,  1.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                     0.17104495,  3.,  3.,  1.,  0.,  0.,  0.,  0.,  0.,  0.,  1.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                    -0.61417373,  4.,  4.,  0.,  1.,  0.,  0.,  0.,  0.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                    -0.76416192,  0.,  0.,  0.,  0.,  1.,  0.,  0.,  0.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                    -0.325949,    1.,  1.,  0.,  0.,  0.,  1.,  0.,  0.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                     0.69981558,  2.,  2.,  0.,  0.,  0.,  0.,  1.,  0.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                     1.45340838,  3.,  3.,  0.,  0.,  0.,  0.,  0.,  1.,  0.,  0.]]),
+         np.array([[ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                     0.03657206,  4.,  4.,  1.,  0.,  0.,  0.,  0.,  0.,  1.,  0.]])],
+        ['lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_5', 'exog_1', 'exog_2', 'exog_3',
+         'weekend', 'day_of_week_0', 'day_of_week_1', 'day_of_week_2',
+         'day_of_week_3', 'day_of_week_4', 'day_of_week_5', 'day_of_week_6'],
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        pd.date_range(start='2020-02-20', periods=10, freq='D')
+    )
+
+    for step in range(len(expected[0])):
+        np.testing.assert_almost_equal(results[0][step], expected[0][step])
+    assert results[1] == expected[1]
+    assert results[2] == expected[2]
+    pd.testing.assert_index_equal(results[3], expected[3])
+    assert results[4] is None

@@ -4,6 +4,7 @@ import re
 import pytest
 import numpy as np
 import pandas as pd
+import warnings
 from sklearn.linear_model import LinearRegression
 from sklearn.exceptions import NotFittedError
 from sklearn.preprocessing import StandardScaler
@@ -18,7 +19,9 @@ def test_set_out_sample_residuals_NotFittedError_when_forecaster_not_fitted():
     """
     Test NotFittedError is raised when forecaster is not fitted.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     y_true = np.array([1, 2, 3, 4, 5])
     y_pred = np.array([1, 2, 3, 4, 5])
     err_msg = re.escape(
@@ -29,12 +32,13 @@ def test_set_out_sample_residuals_NotFittedError_when_forecaster_not_fitted():
         forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred)
 
 
-
 def test_set_out_sample_residuals_TypeError_when_y_true_is_not_array_or_series():
     """
     Test TypeError is raised when y_true is not a numpy array or series.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     forecaster.is_fitted = True
     y_true = 'not_valid'
     y_pred = np.array([1, 2, 3])
@@ -51,7 +55,9 @@ def test_set_out_sample_residuals_TypeError_when_y_pred_is_not_array_or_series()
     """
     Test TypeError is raised when y_pred is not a numpy array or series.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     forecaster.is_fitted = True
     y_true = np.array([1, 2, 3])
     y_pred = 'not_valid'
@@ -68,7 +74,9 @@ def test_set_out_sample_residuals_ValueError_when_y_true_and_y_pred_have_differe
     """
     Test ValueError is raised when y_true and y_pred have with different length.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     forecaster.is_fitted = True
     y_true = np.array([1, 2, 3, 4, 5])
     y_pred = np.array([1, 2, 3])
@@ -84,7 +92,9 @@ def test_set_out_sample_residuals_ValueError_when_y_true_and_y_pred_are_series_w
     """
     Test ValueError is raised when y_true and y_pred have series with different indexes.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     forecaster.is_fitted = True
     y_true = pd.Series([1, 2, 3, 4, 5], index=[1, 2, 3, 4, 5])
     y_pred = pd.Series([1, 2, 3, 4, 5])
@@ -105,7 +115,9 @@ def test_set_out_sample_residuals_when_residuals_length_is_less_than_10000_and_n
     y_true = pd.Series(rng.normal(loc=10, scale=10, size=1000))
     y_pred = pd.Series(rng.normal(loc=10, scale=10, size=1000))
 
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     forecaster.fit(y=y)
     forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred)
     forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred, append=False)
@@ -124,7 +136,9 @@ def test_set_out_sample_residuals_when_residuals_length_is_less_than_10000_and_a
     y_true = pd.Series(rng.normal(loc=10, scale=10, size=1000))
     y_pred = pd.Series(rng.normal(loc=10, scale=10, size=1000))
 
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=2)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=2
+    )
     forecaster.fit(y=y)
     forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred)
     forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred, append=True)
@@ -142,7 +156,7 @@ def test_set_out_sample_residuals_when_residuals_length_is_greater_than_10000():
     y_fit = pd.Series(rng.normal(loc=10, scale=10, size=50_000))
 
     forecaster = ForecasterDirect(
-        LinearRegression(), lags=1, steps=1, binner_kwargs={"n_bins": 10}
+        estimator=LinearRegression(), lags=1, steps=1, binner_kwargs={"n_bins": 10}
     )
     forecaster.fit(y=y_fit)
     X_train, y_train = forecaster.create_train_X_y(y_fit)
@@ -151,7 +165,7 @@ def test_set_out_sample_residuals_when_residuals_length_is_greater_than_10000():
     )
 
     y_true = y_train_step_1
-    y_pred = forecaster.regressors_[1].predict(X_train_step_1)
+    y_pred = forecaster.estimators_[1].predict(X_train_step_1)
     forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred)
 
     assert len(forecaster.out_sample_residuals_) == 10_000
@@ -165,22 +179,22 @@ def test_out_sample_residuals_by_bin_and_in_sample_residuals_by_bin_equivalence(
     when training data and training predictions are passed.
     """
     forecaster = ForecasterDirect(
-                    regressor     = LinearRegression(),
+                    estimator     = LinearRegression(),
                     steps         = 3,
                     lags          = 5,
                     binner_kwargs = {'n_bins': 3}
                 )
     forecaster.fit(y, store_in_sample_residuals=True)
     X_train, y_train = forecaster.create_train_X_y(y)
-    for step  in np.arange(forecaster.steps) + 1:
+    for step in forecaster.steps:
         X_train_step, y_train_step = forecaster.filter_train_X_y_for_step(
             step=step, X_train=X_train, y_train=y_train
         )
         y_true = y_train_step
-        y_pred = forecaster.regressors_[step].predict(X_train_step)
+        y_pred = forecaster.estimators_[step].predict(X_train_step)
         forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred, append=True)
 
-    assert(set(forecaster.out_sample_residuals_) == set(forecaster.in_sample_residuals_))
+    assert (set(forecaster.out_sample_residuals_) == set(forecaster.in_sample_residuals_))
 
     for k in forecaster.out_sample_residuals_by_bin_.keys():
         np.testing.assert_array_almost_equal(
@@ -201,7 +215,7 @@ def test_set_out_sample_residuals_append_new_residuals_per_bin():
     )
 
     forecaster = ForecasterDirect(
-        LinearRegression(), lags=1, steps=1, binner_kwargs={"n_bins": 2}
+        estimator=LinearRegression(), lags=1, steps=1, binner_kwargs={"n_bins": 2}
     )
     forecaster.fit(y=y_fit)
     X_train, y_train = forecaster.create_train_X_y(y_fit)
@@ -210,7 +224,7 @@ def test_set_out_sample_residuals_append_new_residuals_per_bin():
     )
 
     y_true = y_train_step_1
-    y_pred = forecaster.regressors_[1].predict(X_train_step_1)
+    y_pred = forecaster.estimators_[1].predict(X_train_step_1)
     for i in range(1, 20):
         forecaster.set_out_sample_residuals(y_true=y_true, y_pred=y_pred, append=True)
         for v in forecaster.out_sample_residuals_by_bin_.values():
@@ -228,7 +242,7 @@ def test_set_out_sample_residuals_when_there_are_no_residuals_for_some_bins():
         )
 
     forecaster = ForecasterDirect(
-        regressor=LinearRegression(), steps=1, lags=5, binner_kwargs={"n_bins": 3}
+        estimator=LinearRegression(), steps=1, lags=5, binner_kwargs={"n_bins": 3}
     )
     forecaster.fit(y)
     y_pred = y.loc[y > 10]
@@ -257,7 +271,7 @@ def test_forecaster_set_out_sample_residuals_when_transformer_y_and_differentiat
     y_true  = rng.normal(loc=0, scale=1, size=5)
     y_pred = rng.normal(loc=0, scale=1, size=5)
     forecaster = ForecasterDirect(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      steps           = 2, 
                      lags            = 5,
                      transformer_y   = StandardScaler(),
@@ -269,8 +283,15 @@ def test_forecaster_set_out_sample_residuals_when_transformer_y_and_differentiat
         y_pred = y_pred
     )
 
-    y_true = forecaster.transformer_y.transform(y_true.reshape(-1, 1)).flatten()
-    y_pred = forecaster.transformer_y.transform(y_pred.reshape(-1, 1)).flatten()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="X does not have valid feature names",
+            category=UserWarning
+        )
+        y_true = forecaster.transformer_y.transform(y_true.reshape(-1, 1)).flatten()
+        y_pred = forecaster.transformer_y.transform(y_pred.reshape(-1, 1)).flatten()
+
     y_true = forecaster.differentiator.transform(y_true)[forecaster.differentiation:]
     y_pred = forecaster.differentiator.transform(y_pred)[forecaster.differentiation:]
     residuals = y_true - y_pred

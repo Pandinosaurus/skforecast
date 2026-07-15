@@ -3,6 +3,7 @@
 import pytest
 import numpy as np
 import pandas as pd
+import sklearn
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
 from skforecast.recursive import ForecasterRecursiveMultiSeries
@@ -16,14 +17,14 @@ cols = [f"col_{i}" for i in range(n_cols)]
 exog_cols = [f"exog_{i}" for i in range(n_cols)]
 index = pd.date_range(start = "2000-01-01", periods = n_data, freq = "MS")
 
-series = pd.DataFrame(data, columns = cols, index = index)
+series_dict = pd.DataFrame(data, columns = cols, index = index).to_dict(orient = 'series')
 exog = pd.DataFrame(data, columns = exog_cols, index = index)
 
 
 @pytest.mark.parametrize("transformer_series", 
                          [StandardScaler(), 
-                          {k: StandardScaler() for k in list(series.columns) + ['_unknown_level']}], 
-                         ids = lambda ts: f'transformer_series: {ts}')
+                          {k: StandardScaler() for k in list(series_dict.keys()) + ['_unknown_level']}], 
+                         ids = ['single_scaler', 'dict_scalers_60_cols'])
 def test_output_preprocess_repr(transformer_series):
     """
     Test matrix of lags created properly when lags is 3, steps is 1 and y is
@@ -32,9 +33,9 @@ def test_output_preprocess_repr(transformer_series):
     forecaster = ForecasterRecursiveMultiSeries(
         LinearRegression(), lags=2, transformer_series=transformer_series
     )
-    forecaster.fit(series=series, exog=exog)
+    forecaster.fit(series=series_dict, exog=exog)
     results = forecaster._preprocess_repr(
-                  regressor          = forecaster.regressor, 
+                  estimator          = forecaster.estimator, 
                   training_range_    = forecaster.training_range_, 
                   series_names_in_   = forecaster.series_names_in_, 
                   exog_names_in_     = forecaster.exog_names_in_, 
@@ -48,8 +49,57 @@ def test_output_preprocess_repr(transformer_series):
         "exog_0, exog_1, exog_2, exog_3, exog_4, exog_5, exog_6, exog_7, exog_8, exog_9, exog_10, exog_11, exog_12, exog_13, exog_14, exog_15, exog_16, exog_17, exog_18, exog_19, exog_20, exog_21, exog_22, exog_23, exog_24, ..., exog_35, exog_36, exog_37, exog_38, exog_39, exog_40, exog_41, exog_42, exog_43, exog_44, exog_45, exog_46, exog_47, exog_48, exog_49, exog_50, exog_51, exog_52, exog_53, exog_54, exog_55, exog_56, exog_57, exog_58, exog_59",
         "StandardScaler()"
     ]
+    if sklearn.__version__ >= "1.7.0":
+        expected[0] = expected[0][:-1] + ", 'tol': 1e-06}"
     if isinstance(transformer_series, dict):
         expected[-1] = "'col_0': StandardScaler(), 'col_1': StandardScaler(), 'col_2': StandardScaler(), 'col_3': StandardScaler(), 'col_4': StandardScaler(), ..., 'col_56': StandardScaler(), 'col_57': StandardScaler(), 'col_58': StandardScaler(), 'col_59': StandardScaler(), '_unknown_level': StandardScaler()"
 
     for r, e in zip(results, expected):
         assert r == e
+
+
+def test_preprocess_repr_as_html_with_categorical_features():
+    """
+    Test _preprocess_repr with as_html=True adds CAT badge to categorical
+    features and html-escapes names.
+    """
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=2
+    )
+    exog_names = ['num_feat', 'cat_feat']
+    cat_names = ['cat_feat']
+
+    _, _, _, exog_html, _ = forecaster._preprocess_repr(
+        exog_names_in_=exog_names,
+        categorical_features_names_in_=cat_names,
+        as_html=True,
+    )
+
+    assert 'num_feat' in exog_html
+    assert '>CAT</span>' in exog_html
+    assert 'cat_feat' in exog_html
+    # CAT badge only on cat_feat, not on num_feat
+    num_idx = exog_html.index('num_feat')
+    cat_idx = exog_html.index('cat_feat')
+    assert exog_html[num_idx:cat_idx].count('>CAT</span>') == 0
+
+
+def test_preprocess_repr_as_html_truncation_uses_styled_ellipsis():
+    """
+    Test _preprocess_repr with as_html=True and >50 exog names uses styled
+    ellipsis instead of plain '...'.
+    """
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=2
+    )
+    exog_names = [f'exog_{i}' for i in range(60)]
+
+    _, _, _, exog_html, _ = forecaster._preprocess_repr(
+        exog_names_in_=exog_names,
+        as_html=True,
+    )
+
+    assert '<em style="color: #999;">\u2026</em>' in exog_html
+    assert '...' not in exog_html
+    assert 'exog_0' in exog_html
+    assert 'exog_59' in exog_html

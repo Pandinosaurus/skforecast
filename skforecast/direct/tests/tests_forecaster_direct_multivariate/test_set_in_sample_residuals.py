@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.exceptions import NotFittedError
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import HistGradientBoostingRegressor
 from skforecast.direct import ForecasterDirectMultiVariate
 
 # Fixtures
@@ -18,7 +19,7 @@ def test_set_in_sample_residuals_NotFittedError_when_forecaster_not_fitted():
     Test NotFittedError is raised when forecaster is not fitted.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3
+        estimator=LinearRegression(), level='l1', steps=2, lags=3
     )
 
     err_msg = re.escape(
@@ -33,12 +34,12 @@ def test_set_in_sample_residuals_NotFittedError_when_forecaster_not_fitted():
                          [pd.RangeIndex(start=50, stop=100), 
                           pd.date_range(start='1991-07-01', periods=50, freq='MS')], 
                          ids=lambda idx: f'diff_index: {idx[[0, -1]]}')
-def test_set_in_sample_residuals_IndexError_when_series_has_different_index_than_training(diff_index):
+def test_set_in_sample_residuals_IndexError_when_series_different_index_than_training(diff_index):
     """
     Test IndexError is raised when series has different index than training.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3
+        estimator=LinearRegression(), level='l1', steps=2, lags=3
     )
     forecaster.fit(series=series, exog=exog["exog_1"])
 
@@ -63,7 +64,7 @@ def test_set_in_sample_residuals_ValueError_when_X_train_features_names_out_not_
     the ones used in training.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3
+        estimator=LinearRegression(), level='l1', steps=2, lags=3
     )
     forecaster.fit(series=series, exog=exog["exog_1"])
     original_exog_in_ = forecaster.exog_in_
@@ -91,13 +92,13 @@ def test_set_in_sample_residuals_store_same_residuals_as_fit():
     Test that set_in_sample_residuals stores same residuals as fit.
     """
     forecaster_1 = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=3, lags=3, transformer_series=StandardScaler(), 
+        estimator=LinearRegression(), level='l1', steps=3, lags=3, transformer_series=StandardScaler(), 
         differentiation=1, binner_kwargs={'n_bins': 3}
     )
     forecaster_1.fit(series=series, exog=exog["exog_1"], store_in_sample_residuals=True)
 
     forecaster_2 = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=3, lags=3, transformer_series=StandardScaler(), 
+        estimator=LinearRegression(), level='l1', steps=3, lags=3, transformer_series=StandardScaler(), 
         differentiation=1, binner_kwargs={'n_bins': 3}
     )
     forecaster_2.fit(series=series, exog=exog["exog_1"], store_in_sample_residuals=False)
@@ -135,4 +136,47 @@ def test_set_in_sample_residuals_store_same_residuals_as_fit():
     for level in forecaster_1.in_sample_residuals_by_bin_.keys():
         for bin in forecaster_1.in_sample_residuals_by_bin_[level]:
             np.testing.assert_almost_equal(forecaster_1.in_sample_residuals_by_bin_[level][bin], forecaster_2.in_sample_residuals_by_bin_[level][bin])
+    assert forecaster_1.binner_intervals_ == forecaster_2.binner_intervals_
+
+
+def test_set_in_sample_residuals_store_same_residuals_as_fit_when_series_has_NaN():
+    """
+    Test that set_in_sample_residuals stores same residuals as fit when
+    series has interspersed NaN values. Uses HistGradientBoostingRegressor
+    since it natively handles NaN and dropna_from_series=True.
+    """
+    series_nan = pd.DataFrame(
+        {'l1': [0, 1, 2, np.nan, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                15, 16, 17, 18, 19, 20, 21, 22, 23, np.nan, 25, 26, 27, 28, 29],
+         'l2': np.arange(50, 80, dtype=float)},
+        index=pd.date_range('2020-01-01', periods=30, freq='D'),
+        dtype=float,
+    )
+
+    forecaster_1 = ForecasterDirectMultiVariate(
+        estimator=HistGradientBoostingRegressor(random_state=123),
+        level='l1', steps=2, lags=3, transformer_series=None,
+        dropna_from_series=True, binner_kwargs={'n_bins': 3},
+    )
+    forecaster_1.fit(series=series_nan, store_in_sample_residuals=True)
+
+    forecaster_2 = ForecasterDirectMultiVariate(
+        estimator=HistGradientBoostingRegressor(random_state=123),
+        level='l1', steps=2, lags=3, transformer_series=None,
+        dropna_from_series=True, binner_kwargs={'n_bins': 3},
+    )
+    forecaster_2.fit(series=series_nan, store_in_sample_residuals=False)
+    forecaster_2.set_in_sample_residuals(series=series_nan)
+
+    for level in forecaster_1.in_sample_residuals_.keys():
+        np.testing.assert_almost_equal(
+            forecaster_1.in_sample_residuals_[level],
+            forecaster_2.in_sample_residuals_[level],
+        )
+    for level in forecaster_1.in_sample_residuals_by_bin_.keys():
+        for k in forecaster_1.in_sample_residuals_by_bin_[level]:
+            np.testing.assert_almost_equal(
+                forecaster_1.in_sample_residuals_by_bin_[level][k],
+                forecaster_2.in_sample_residuals_by_bin_[level][k],
+            )
     assert forecaster_1.binner_intervals_ == forecaster_2.binner_intervals_

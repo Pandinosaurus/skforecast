@@ -2,6 +2,7 @@
 # ==============================================================================
 import re
 import pytest
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
@@ -154,7 +155,7 @@ def test_set_out_sample_residuals_when_residuals_length_is_greater_than_10000():
     forecaster.fit(y_fit)
     X_train, y_train = forecaster.create_train_X_y(y_fit)
 
-    y_pred = forecaster.regressor.predict(X_train)
+    y_pred = forecaster.estimator.predict(X_train)
     forecaster.set_out_sample_residuals(y_true=y_train, y_pred=y_pred)
 
     assert len(forecaster.out_sample_residuals_) == 10_000
@@ -168,15 +169,15 @@ def test_out_sample_residuals_by_bin_and_in_sample_residuals_by_bin_equivalence(
     when training data and training predictions are passed.
     """
     forecaster = ForecasterRecursive(
-                     regressor = LinearRegression(),
+                     estimator = LinearRegression(),
                      lags = 5,
                      binner_kwargs = {'n_bins': 3}
                  )
     forecaster.fit(y, store_in_sample_residuals=True)
 
     X_train, y_train = forecaster.create_train_X_y(y)
-    forecaster.regressor.fit(X_train, y_train)
-    predictions = forecaster.regressor.predict(X_train)
+    forecaster.estimator.fit(X_train, y_train)
+    predictions = forecaster.estimator.predict(X_train)
 
     forecaster.set_out_sample_residuals(
         y_true = y_train,
@@ -203,11 +204,11 @@ def test_set_out_sample_residuals_append_new_residuals_per_bin():
             )
 
     forecaster = ForecasterRecursive(
-        regressor=LinearRegression(), lags=1, binner_kwargs={"n_bins": 2}
+        estimator=LinearRegression(), lags=1, binner_kwargs={"n_bins": 2}
     )
     forecaster.fit(y_fit)   
     X_train, y_train = forecaster.create_train_X_y(y=y_fit)
-    y_pred = forecaster.regressor.predict(X_train)
+    y_pred = forecaster.estimator.predict(X_train)
 
     for i in range(1, 20):
         forecaster.set_out_sample_residuals(y_true=y_train, y_pred=y_pred, append=True)
@@ -226,7 +227,7 @@ def test_set_out_sample_residuals_when_there_are_no_residuals_for_some_bins():
         )
 
     forecaster = ForecasterRecursive(
-        regressor=LinearRegression(), lags=5, binner_kwargs={"n_bins": 3}
+        estimator=LinearRegression(), lags=5, binner_kwargs={"n_bins": 3}
     )
     forecaster.fit(y)
     y_pred = y.loc[y > 10]
@@ -255,7 +256,7 @@ def test_forecaster_set_out_sample_residuals_when_transformer_y_and_differentiat
     y_true  = pd.Series(rng.normal(loc=0, scale=1, size=36), index=range(100, 136))
     y_pred = rng.uniform(low=-2.5, high=2, size=36)
     forecaster = ForecasterRecursive(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      lags            = 5,
                      transformer_y   = StandardScaler(),
                      differentiation = 1,
@@ -268,8 +269,15 @@ def test_forecaster_set_out_sample_residuals_when_transformer_y_and_differentiat
         y_pred = y_pred
     )
 
-    y_true = forecaster.transformer_y.transform(y_true.to_numpy().reshape(-1, 1)).flatten()
-    y_pred = forecaster.transformer_y.transform(y_pred.reshape(-1, 1)).flatten()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="X does not have valid feature names",
+            category=UserWarning
+        )
+        y_true = forecaster.transformer_y.transform(y_true.to_numpy().reshape(-1, 1)).flatten()
+        y_pred = forecaster.transformer_y.transform(y_pred.reshape(-1, 1)).flatten()
+
     y_true = forecaster.differentiator.transform(y_true)[forecaster.differentiation:]
     y_pred = forecaster.differentiator.transform(y_pred)[forecaster.differentiation:]
     residuals = y_true - y_pred

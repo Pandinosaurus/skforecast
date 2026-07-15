@@ -33,7 +33,9 @@ def test_create_predict_X_TypeError_when_steps_list_contain_floats(steps):
     """
     Test create_predict_X TypeError when steps is a list with floats.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(y=pd.Series(np.arange(10)))
 
     err_msg = re.escape(
@@ -48,7 +50,9 @@ def test_create_predict_X_NotFittedError_when_fitted_is_False():
     """
     Test NotFittedError is raised when fitted is False.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
 
     err_msg = re.escape(
         "This Forecaster instance is not fitted yet. Call `fit` with "
@@ -64,7 +68,9 @@ def test_create_predict_X_output(steps):
     """
     Test create_predict_X output.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=3)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=3
+    )
     forecaster.fit(y=pd.Series(np.arange(50, dtype=float)))
     results = forecaster.create_predict_X(steps=steps)
 
@@ -80,12 +86,14 @@ def test_create_predict_X_output(steps):
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_create_predict_X_output_when_regressor_is_LinearRegression_with_list_interspersed():
+def test_create_predict_X_output_when_with_list_interspersed():
     """
     Test create_predict_X output when steps is
     a list with interspersed steps.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(y=pd.Series(np.arange(50, dtype=float)))
     results = forecaster.create_predict_X(steps=[1, 4])
 
@@ -102,11 +110,13 @@ def test_create_predict_X_output_when_regressor_is_LinearRegression_with_list_in
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_create_predict_X_output_when_regressor_is_LinearRegression_using_last_window():
+def test_create_predict_X_output_when_using_last_window():
     """
     Test create_predict_X output when external last_window.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(y=pd.Series(np.arange(50, dtype=float)))
     last_window = pd.Series(
         data  = [47., 48., 49.], 
@@ -130,7 +140,9 @@ def test_create_predict_X_output_when_exog():
     """
     Test create_predict_X output when exog.
     """
-    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=5)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=3, steps=5
+    )
     forecaster.fit(
         y    = pd.Series(np.arange(50, dtype=float)),
         exog = pd.Series(np.arange(start=100, stop=150, step=1, dtype=float), name="exog")
@@ -167,7 +179,7 @@ def test_create_predict_X_output_with_transform_y():
     transformer_y = StandardScaler()
 
     forecaster = ForecasterDirect(
-                     regressor     = LinearRegression(),
+                     estimator     = LinearRegression(),
                      lags          = 5,
                      steps         = 5,
                      transformer_y = transformer_y,
@@ -218,7 +230,7 @@ def test_create_predict_X_output_with_transform_y_and_transform_exog(n_jobs):
                        )
     
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = 5,
                      steps            = 5,
                      transformer_y    = transformer_y,
@@ -250,9 +262,11 @@ def test_create_predict_X_output_when_categorical_features_native_implementation
     Test create_predict_X output when using HistGradientBoostingRegressor 
     and categorical variables.
     """
-    df_exog = pd.DataFrame({'exog_1': exog_categorical,
-                            'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
-                            'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)})
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
     
     exog_predict = df_exog.copy()
     exog_predict.index = pd.RangeIndex(start=50, stop=100)
@@ -273,7 +287,7 @@ def test_create_predict_X_output_when_categorical_features_native_implementation
                        ).set_output(transform="pandas")
     
     forecaster = ForecasterDirect(
-                     regressor        = HistGradientBoostingRegressor(
+                     estimator        = HistGradientBoostingRegressor(
                                             categorical_features = categorical_features,
                                             random_state         = 123
                                         ),
@@ -312,9 +326,11 @@ def test_create_predict_X_when_categorical_features_auto_detect_LGBMRegressor():
     """
     Test create_predict_X when using LGBMRegressor and categorical variables.
     """
-    df_exog = pd.DataFrame({'exog_1': exog_categorical,
-                            'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
-                            'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)})
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
     
     exog_predict = df_exog.copy()
     exog_predict.index = pd.RangeIndex(start=50, stop=100)
@@ -342,11 +358,12 @@ def test_create_predict_X_when_categorical_features_auto_detect_LGBMRegressor():
                        ).set_output(transform="pandas")
     
     forecaster = ForecasterDirect(
-                     regressor        = LGBMRegressor(verbose=-1, random_state=123),
+                     estimator        = LGBMRegressor(verbose=-1, random_state=123),
                      lags             = 5,
                      steps            = 10, 
                      transformer_y    = None,
-                     transformer_exog = transformer_exog
+                     transformer_exog = transformer_exog,
+                     categorical_features = None
                  )
     forecaster.fit(y=y_categorical, exog=df_exog)
     results = forecaster.create_predict_X(steps=10, exog=exog_predict)
@@ -375,9 +392,133 @@ def test_create_predict_X_when_categorical_features_auto_detect_LGBMRegressor():
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_create_predict_X_when_regressor_is_LinearRegression_with_exog_differentiation_is_1_and_transformer_y_steps_1():
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_create_predict_X_when_categorical_features_auto_and_explicit_no_transformer_exog(
+    categorical_features,
+):
     """
-    Test create_predict_X when using LinearRegression as regressor and differentiation=1,
+    Test create_predict_X when using internal categorical encoding
+    (`categorical_features='auto'` and explicit list) without `transformer_exog`.
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+
+    exog_predict = df_exog.copy()
+    exog_predict.index = pd.RangeIndex(start=50, stop=100)
+
+    forecaster = ForecasterDirect(
+                     estimator            = LinearRegression(),
+                     lags                 = 5,
+                     steps                = 10,
+                     transformer_y        = None,
+                     transformer_exog     = None,
+                     categorical_features = categorical_features
+                 )
+    forecaster.fit(y=y_categorical, exog=df_exog)
+    results = forecaster.create_predict_X(steps=10, exog=exog_predict)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.12062867, 0.        , 0.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.8263408 , 1.        , 1.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.60306013, 2.        , 2.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.54506801, 3.        , 3.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34276383, 4.        , 4.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.30412079, 0.        , 0.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.41702221, 1.        , 1.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.68130077, 2.        , 2.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.87545684, 3.        , 3.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.51042234, 4.        , 4.        ]]),
+        columns = ['lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_5',
+                   'exog_1', 'exog_2', 'exog_3'],
+        index = pd.RangeIndex(start=50, stop=60, step=1)
+    )
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_categorical_features_auto_with_transformer_exog():
+    """
+    Test create_predict_X when using internal categorical encoding
+    (`categorical_features='auto'`) together with `transformer_exog`
+    (StandardScaler on numeric columns).
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog_categorical,
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+
+    exog_predict = df_exog.copy()
+    exog_predict.index = pd.RangeIndex(start=50, stop=100)
+
+    transformer_exog = make_column_transformer(
+                           (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                           remainder='passthrough',
+                           verbose_feature_names_out=False,
+                       ).set_output(transform='pandas')
+
+    forecaster = ForecasterDirect(
+                     estimator            = LinearRegression(),
+                     lags                 = 5,
+                     steps                = 10,
+                     transformer_y        = None,
+                     transformer_exog     = transformer_exog,
+                     categorical_features = 'auto'
+                 )
+    forecaster.fit(y=y_categorical, exog=df_exog)
+    results = forecaster.create_predict_X(steps=10, exog=exog_predict)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 -1.47636391, 0.        , 0.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                  1.26277054, 1.        , 1.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                  0.3961342 , 2.        , 2.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                  0.17104495, 3.        , 3.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 -0.61417373, 4.        , 4.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 -0.76416192, 0.        , 0.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 -0.325949  , 1.        , 1.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                  0.69981558, 2.        , 2.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                  1.45340838, 3.        , 3.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                  0.03657206, 4.        , 4.        ]]),
+        columns = ['lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_5',
+                   'exog_1', 'exog_2', 'exog_3'],
+        index = pd.RangeIndex(start=50, stop=60, step=1)
+    )
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_with_exog_differentiation_is_1_and_transformer_y_steps_1():
+    """
+    Test create_predict_X when using LinearRegression as estimator and differentiation=1,
     and transformer_y is StandardScaler, steps=1.
     """
 
@@ -390,7 +531,7 @@ def test_create_predict_X_when_regressor_is_LinearRegression_with_exog_different
     )
 
     forecaster = ForecasterDirect(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      lags            = [1, 5],
                      steps           = 1,
                      differentiation = 1
@@ -409,9 +550,9 @@ def test_create_predict_X_when_regressor_is_LinearRegression_with_exog_different
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_create_predict_X_when_regressor_is_LinearRegression_with_exog_differentiation_is_1_and_transformer_y_steps_5():
+def test_create_predict_X_when_with_exog_differentiation_is_1_and_transformer_y_steps_5():
     """
-    Test create_predict_X when using LinearRegression as regressor and differentiation=1,
+    Test create_predict_X when using LinearRegression as estimator and differentiation=1,
     and transformer_y is StandardScaler, steps=5.
     """
 
@@ -424,7 +565,7 @@ def test_create_predict_X_when_regressor_is_LinearRegression_with_exog_different
     )
 
     forecaster = ForecasterDirect(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      lags            = [1, 5],
                      steps           = 5,
                      differentiation = 1
@@ -468,7 +609,7 @@ def test_create_predict_X_when_window_features_steps_1():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirect(
-        LinearRegression(), steps=1, lags=5, window_features=[rolling, rolling_2]
+        estimator=LinearRegression(), steps=1, lags=5, window_features=[rolling, rolling_2]
     )
     forecaster.fit(y=y_datetime, exog=exog_datetime)
     results = forecaster.create_predict_X(exog=exog_datetime_pred)
@@ -507,7 +648,7 @@ def test_create_predict_X_when_window_features_steps_10():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirect(
-        LinearRegression(), steps=10, lags=5, window_features=[rolling, rolling_2]
+        estimator=LinearRegression(), steps=10, lags=5, window_features=[rolling, rolling_2]
     )
     forecaster.fit(y=y_datetime, exog=exog_datetime)
     results = forecaster.create_predict_X(exog=exog_datetime_pred)
@@ -555,7 +696,7 @@ def test_create_predict_X_when_window_features_and_lags_None_steps_10():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirect(
-        LinearRegression(), steps=10, lags=None, window_features=[rolling, rolling_2]
+        estimator=LinearRegression(), steps=10, lags=None, window_features=[rolling, rolling_2]
     )
     forecaster.fit(y=y_datetime, exog=exog_datetime)
     results = forecaster.create_predict_X(exog=exog_datetime_pred)
@@ -582,7 +723,7 @@ def test_create_predict_X_when_window_features_and_lags_None_steps_10():
 def test_create_predict_X_same_predictions_as_predict():
     """
     Test create_predict_X matrix returns the same predictions as predict method
-    when passing to the regressor predict method.
+    when passing to the estimator predict method.
     """
 
     end_train = '2003-03-01 23:59:00'
@@ -596,7 +737,7 @@ def test_create_predict_X_same_predictions_as_predict():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = [1, 5],
                      window_features  = [rolling, rolling_2],
                      steps            = 6,
@@ -607,8 +748,8 @@ def test_create_predict_X_same_predictions_as_predict():
     forecaster.fit(y=data.loc[:end_train], exog=exog.loc[:end_train])
     X_predict = forecaster.create_predict_X(exog=exog.loc[end_train:])
 
-    for i, step in enumerate(range(1, forecaster.steps + 1)):
-        results = forecaster.regressors_[step].predict(X_predict.iloc[[i]])
+    for i, step in enumerate(forecaster.steps):
+        results = forecaster.estimators_[step].predict(X_predict.iloc[[i]])
         expected = forecaster.predict(steps=[step], exog=exog.loc[end_train:]).to_numpy()
         np.testing.assert_array_almost_equal(results, expected, decimal=7)
 
@@ -616,7 +757,7 @@ def test_create_predict_X_same_predictions_as_predict():
 def test_create_predict_X_same_predictions_as_predict_transformers():
     """
     Test create_predict_X matrix returns the same predictions as predict method
-    when passing to the regressor predict method with transformation.
+    when passing to the estimator predict method with transformation.
     """
 
     end_train = '2003-03-01 23:59:00'
@@ -630,7 +771,7 @@ def test_create_predict_X_same_predictions_as_predict_transformers():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = [1, 5],
                      window_features  = [rolling, rolling_2],
                      steps            = 6,
@@ -651,8 +792,8 @@ def test_create_predict_X_same_predictions_as_predict_transformers():
     with pytest.warns(DataTransformationWarning, match = warn_msg):
         X_predict = forecaster.create_predict_X(exog=exog.loc[end_train:])
 
-    for i, step in enumerate(range(1, forecaster.steps + 1)):
-        results = forecaster.regressors_[step].predict(X_predict.iloc[[i]])
+    for i, step in enumerate(forecaster.steps):
+        results = forecaster.estimators_[step].predict(X_predict.iloc[[i]])
         results = transform_numpy(
                       array             = results,
                       transformer       = forecaster.transformer_y,
@@ -666,7 +807,7 @@ def test_create_predict_X_same_predictions_as_predict_transformers():
 def test_create_predict_X_same_predictions_as_predict_transformers_diff():
     """
     Test create_predict_X matrix returns the same predictions as predict method
-    when passing to the regressor predict method with transformation and differentiation.
+    when passing to the estimator predict method with transformation and differentiation.
     """
 
     end_train = '2003-03-01 23:59:00'
@@ -680,7 +821,7 @@ def test_create_predict_X_same_predictions_as_predict_transformers_diff():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      lags             = [1, 5],
                      window_features  = [rolling, rolling_2],
                      steps            = 6,
@@ -701,8 +842,8 @@ def test_create_predict_X_same_predictions_as_predict_transformers_diff():
     with pytest.warns(DataTransformationWarning, match = warn_msg):
         X_predict = forecaster.create_predict_X(exog=exog.loc[end_train:])
 
-    for i, step in enumerate(range(1, forecaster.steps + 1)):
-        results = forecaster.regressors_[step].predict(X_predict.iloc[[i]])
+    for i, step in enumerate(forecaster.steps):
+        results = forecaster.estimators_[step].predict(X_predict.iloc[[i]])
         results = forecaster.differentiator.inverse_transform_next_window(results)
         results = transform_numpy(
                       array             = results,

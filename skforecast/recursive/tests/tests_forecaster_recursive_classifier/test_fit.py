@@ -1,0 +1,489 @@
+# Unit test fit ForecasterRecursiveClassifier
+# ==============================================================================
+import re
+import pytest
+import numpy as np
+import pandas as pd
+from catboost import CatBoostClassifier
+from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from skforecast.exceptions import MissingValuesWarning
+from skforecast.preprocessing import RollingFeaturesClassification
+from skforecast.recursive import ForecasterRecursiveClassifier
+
+# Fixtures
+from .fixtures_forecaster_recursive_classifier import y, y_dt
+from .fixtures_forecaster_recursive_classifier import exog, exog_dt
+
+
+def custom_weights(index):  # pragma: no cover
+    """
+    Return 0 if index is between 20 and 40 else 1.
+    """
+    weights = np.where(
+                (index >= 20) & (index <= 40),
+                0,
+                1
+              )
+    
+    return weights
+
+
+@pytest.mark.parametrize(
+    "forecaster_kwargs",
+    [
+        {"estimator": LogisticRegression(), "lags": 3},
+        {"estimator": LogisticRegression(), "lags": 3,
+         "window_features": RollingFeaturesClassification(stats=['proportion'], window_sizes=4)},
+        {"estimator": LogisticRegression(), "lags": 3,
+         "window_features": RollingFeaturesClassification(stats=['proportion'], window_sizes=4),
+         "transformer_exog": StandardScaler()},
+    ],
+    ids=["base", "window_features", "transformers"]
+)
+def test_forecaster_fit_does_not_modify_y_exog(forecaster_kwargs):
+    """
+    Test forecaster.fit does not modify y and exog.
+    """
+    y_local = y.copy()
+    exog_local = exog.copy()
+    y_copy = y_local.copy()
+    exog_copy = exog_local.copy()
+
+    forecaster = ForecasterRecursiveClassifier(**forecaster_kwargs)
+    forecaster.fit(y=y_local, exog=exog_local)
+
+    pd.testing.assert_series_equal(y_local, y_copy)
+    pd.testing.assert_series_equal(exog_local, exog_copy)
+
+
+def test_forecaster_y_exog_features_stored():
+    """
+    Test forecaster stores y and exog features after fitting.
+    """
+    rolling = RollingFeaturesClassification(
+        stats=['proportion', 'mode'], window_sizes=4
+    )
+    forecaster = ForecasterRecursiveClassifier(
+        LogisticRegression(), lags=3, window_features=rolling
+    )
+    forecaster.fit(y=y, exog=exog)
+
+    series_name_in_ = 'y'
+    exog_in_ = True
+    exog_type_in_ = type(exog)
+    exog_names_in_ = ['exog']
+    exog_dtypes_in_ = {'exog': exog.dtype}
+    exog_dtypes_out_ = {'exog': exog.dtype}
+    X_train_window_features_names_out_ = [
+        'roll_proportion_4_class_0', 'roll_proportion_4_class_1',
+        'roll_proportion_4_class_2', 'roll_mode_4'
+    ]
+    X_train_exog_names_out_ = ['exog']
+    X_train_features_names_out_ = [
+        'lag_1', 'lag_2', 'lag_3', 
+        'roll_proportion_4_class_0', 'roll_proportion_4_class_1',
+        'roll_proportion_4_class_2', 'roll_mode_4', 'exog'
+    ]
+
+    classes_ = [np.int64(1), np.int64(2), np.int64(3)]
+    class_codes_ = [0, 1, 2]
+    n_classes_ = 3
+    encoding_mapping_ = {np.int64(1): 0, np.int64(2): 1, np.int64(3): 2}
+    code_to_class_mapping_ = {0: np.int64(1), 1: np.int64(2), 2: np.int64(3)}
+    
+    assert forecaster.series_name_in_ == series_name_in_
+    assert forecaster.exog_in_ == exog_in_
+    assert forecaster.exog_type_in_ == exog_type_in_
+    assert forecaster.exog_names_in_ == exog_names_in_
+    assert forecaster.exog_dtypes_in_ == exog_dtypes_in_
+    assert forecaster.exog_dtypes_out_ == exog_dtypes_out_
+    assert forecaster.categorical_features_names_in_ == []
+    assert forecaster.X_train_window_features_names_out_ == X_train_window_features_names_out_
+    assert forecaster.X_train_exog_names_out_ == X_train_exog_names_out_
+    assert forecaster.X_train_features_names_out_ == X_train_features_names_out_
+    assert forecaster.classes_ == classes_
+    assert forecaster.class_codes_ == class_codes_
+    assert forecaster.n_classes_ == n_classes_
+    assert forecaster.encoding_mapping_ == encoding_mapping_
+    assert forecaster.code_to_class_mapping_ == code_to_class_mapping_
+
+
+def test_forecaster_y_exog_features_stored_lgbm_as_categorical():
+    """
+    Test forecaster stores y and exog features after fitting when using 
+    LGBMClassifier.
+    """
+    rolling = RollingFeaturesClassification(
+        stats=['proportion', 'mode'], window_sizes=4
+    )
+    forecaster = ForecasterRecursiveClassifier(
+        LGBMClassifier(verbose=-1), lags=3, window_features=rolling
+    )
+    forecaster.fit(y=y_dt, exog=exog_dt)
+
+    series_name_in_ = 'y'
+    exog_in_ = True
+    exog_type_in_ = type(exog_dt)
+    exog_names_in_ = ['exog']
+    exog_dtypes_in_ = {'exog': exog_dt.dtype}
+    exog_dtypes_out_ = {'exog': exog_dt.dtype}
+    X_train_window_features_names_out_ = [
+        'roll_proportion_4_class_0', 'roll_proportion_4_class_1',
+        'roll_proportion_4_class_2', 'roll_mode_4'
+    ]
+    X_train_exog_names_out_ = ['exog']
+    X_train_features_names_out_ = [
+        'lag_1', 'lag_2', 'lag_3', 
+        'roll_proportion_4_class_0', 'roll_proportion_4_class_1',
+        'roll_proportion_4_class_2', 'roll_mode_4', 'exog'
+    ]
+
+    classes_ = [np.int64(1), np.int64(2), np.int64(3)]
+    class_codes_ = [0, 1, 2]
+    n_classes_ = 3
+    encoding_mapping_ = {np.int64(1): 0, np.int64(2): 1, np.int64(3): 2}
+    code_to_class_mapping_ = {0: np.int64(1), 1: np.int64(2), 2: np.int64(3)}
+    
+    assert forecaster.series_name_in_ == series_name_in_
+    assert forecaster.exog_in_ == exog_in_
+    assert forecaster.exog_type_in_ == exog_type_in_
+    assert forecaster.exog_names_in_ == exog_names_in_
+    assert forecaster.exog_dtypes_in_ == exog_dtypes_in_
+    assert forecaster.exog_dtypes_out_ == exog_dtypes_out_
+    assert forecaster.categorical_features_names_in_ == []
+    assert forecaster.X_train_window_features_names_out_ == X_train_window_features_names_out_
+    assert forecaster.X_train_exog_names_out_ == X_train_exog_names_out_
+    assert forecaster.X_train_features_names_out_ == X_train_features_names_out_
+    assert forecaster.classes_ == classes_
+    assert forecaster.class_codes_ == class_codes_
+    assert forecaster.n_classes_ == n_classes_
+    assert forecaster.encoding_mapping_ == encoding_mapping_
+    assert forecaster.code_to_class_mapping_ == code_to_class_mapping_
+
+
+def test_forecaster_DatetimeIndex_index_freq_stored():
+    """
+    Test y_dt.index.freq is stored in forecaster.index_freq.
+    """
+    forecaster = ForecasterRecursiveClassifier(LogisticRegression(), lags=3)
+    forecaster.fit(y=y_dt)
+    expected = y_dt.index.freq
+    results = forecaster.index_freq_
+
+    assert results == expected
+
+
+def test_forecaster_index_step_stored():
+    """
+    Test serie without DatetimeIndex, step is stored in forecaster.index_freq.
+    """
+    forecaster = ForecasterRecursiveClassifier(LogisticRegression(), lags=3)
+    forecaster.fit(y=y)
+    expected = y.index.step
+    results = forecaster.index_freq_
+
+    assert results == expected
+
+
+@pytest.mark.parametrize("store_last_window", 
+                         [True, False], 
+                         ids=lambda lw: f'store_last_window: {lw}')
+def test_fit_last_window_stored(store_last_window):
+    """
+    Test that values of last window are stored after fitting.
+    """
+    forecaster = ForecasterRecursiveClassifier(LogisticRegression(), lags=3)
+    forecaster.fit(y=pd.Series(
+        np.arange(50)), store_last_window=store_last_window
+    )
+    expected = pd.DataFrame(
+        np.array([47, 48, 49]), index=[47, 48, 49], columns=['y']
+    )
+
+    if store_last_window:
+        pd.testing.assert_frame_equal(forecaster.last_window_, expected)
+    else:
+        assert forecaster.last_window_ is None
+
+
+def test_fit_model_coef_when_using_weight_func():
+    """
+    Check the value of the estimator coefs when using a `weight_func`.
+    """
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator   = LogisticRegression(),
+                     lags        = 5,
+                     weight_func = custom_weights
+                 )
+    forecaster.fit(y=y)
+    results = forecaster.estimator.coef_
+    expected = np.array(
+        [
+            [0.07295195, 0.26058532, -0.12877723, -0.70811789, 0.71544608],
+            [0.16912783, -0.11071792, -0.00131558, 0.53663323, -0.83335583],
+            [-0.24207979, -0.1498674, 0.13009281, 0.17148466, 0.11790975],
+        ]
+    )
+
+    np.testing.assert_almost_equal(results, expected)
+
+
+def test_fit_model_coef_when_not_using_weight_func():
+    """
+    Check the value of the estimator coefs when not using a `weight_func`.
+    """
+    forecaster = ForecasterRecursiveClassifier(
+        estimator=LogisticRegression(), lags=5
+    )
+    forecaster.fit(y=y)
+    results = forecaster.estimator.coef_
+    expected = np.array(
+        [
+            [0.33080368, 0.01291936, -0.31347922, -0.43600223, 0.25260526],
+            [-0.3486165, 0.05728672, -0.06652468, 0.25286034, -0.33176274],
+            [0.01781282, -0.07020608, 0.38000389, 0.18314188, 0.07915748],
+        ]
+    )
+
+    np.testing.assert_almost_equal(results, expected)
+
+
+# ==============================================================================
+# Tests: fit with categorical features and configure_estimator_categorical_features
+# ==============================================================================
+@pytest.mark.parametrize(
+    "estimator, check_fn",
+    [
+        (
+            CatBoostClassifier(
+                iterations=10, random_seed=123, verbose=0,
+                allow_writing_files=False
+            ),
+            None
+        ),
+        (
+            LGBMClassifier(verbose=-1, random_state=123),
+            None
+        ),
+        (
+            XGBClassifier(random_state=123),
+            lambda est, cat_idx, n_features: (
+                est.get_params()['enable_categorical'] is True
+                and est.get_params()['feature_types'] == [
+                    'c' if i in cat_idx else 'q' for i in range(n_features)
+                ]
+            )
+        ),
+        (
+            HistGradientBoostingClassifier(random_state=123),
+            lambda est, cat_idx, n_features: (
+                est.get_params()['categorical_features'] == cat_idx
+            )
+        ),
+    ],
+    ids=['CatBoostClassifier', 'LGBMClassifier', 'XGBClassifier', 'HistGradientBoostingClassifier']
+)
+def test_fit_configures_estimator_categorical_features(estimator, check_fn):
+    """
+    Test that fit correctly configures native categorical feature support
+    for each supported estimator, including both autoregressive (lags) and
+    exogenous categorical features.
+    """
+    y_cat = pd.Series(
+        np.array(
+            [2, 1, 3, 2, 2, 1, 2, 2, 1, 1, 2, 3, 2, 2, 2, 3, 1, 3, 3, 2],
+            dtype=int
+        ),
+        name='y'
+    )
+    exog_cat = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float),
+        'exog_cat': pd.Categorical(range(20))
+    })
+
+    forecaster = ForecasterRecursiveClassifier(
+        estimator=estimator, lags=3, categorical_features='auto'
+    )
+    forecaster.fit(y=y_cat, exog=exog_cat)
+
+    assert forecaster.is_fitted
+    assert forecaster.categorical_features_names_in_ == ['exog_cat']
+    assert 'exog_cat' in forecaster.X_train_features_names_out_
+
+    if check_fn is not None:
+        all_cat_names = list(forecaster.lags_names) + ['exog_cat']
+        all_cat_idx = [
+            forecaster.X_train_features_names_out_.index(name)
+            for name in all_cat_names
+        ]
+        n_features = len(forecaster.X_train_features_names_out_)
+        assert check_fn(forecaster.estimator, all_cat_idx, n_features)
+
+    # fit_kwargs must not be mutated
+    assert forecaster.fit_kwargs == {}
+
+
+@pytest.mark.parametrize(
+    "estimator, param_name, default_value",
+    [
+        (
+            XGBClassifier(random_state=123),
+            'feature_types',
+            None
+        ),
+        (
+            HistGradientBoostingClassifier(random_state=123),
+            'categorical_features',
+            'from_dtype'
+        ),
+    ],
+    ids=['XGBClassifier', 'HistGradientBoostingClassifier']
+)
+def test_fit_resets_estimator_categorical_params_on_refit_without_categoricals(
+    estimator, param_name, default_value
+):
+    """
+    Test that fitting with exogenous categorical features and then refitting
+    without categoricals resets the estimator's categorical parameters to
+    their default values. Uses features_encoding='ordinal' so that only
+    exogenous categoricals are configured on the estimator.
+    """
+    y_cat = pd.Series(
+        np.array(
+            [2, 1, 3, 2, 2, 1, 2, 2, 1, 1, 2, 3, 2, 2, 2, 3, 1, 3, 3, 2],
+            dtype=int
+        ),
+        name='y'
+    )
+    exog_with_cat = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float),
+        'exog_cat': pd.Categorical(['a', 'b'] * 10)
+    })
+    exog_no_cat = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float)
+    })
+
+    forecaster = ForecasterRecursiveClassifier(
+        estimator=estimator, lags=3,
+        features_encoding='ordinal',
+        categorical_features='auto'
+    )
+
+    # First fit — with categoricals
+    forecaster.fit(y=y_cat, exog=exog_with_cat)
+    assert forecaster.categorical_features_names_in_ == ['exog_cat']
+
+    # Second fit — without categoricals (auto detects no categories -> [])
+    forecaster.fit(y=y_cat, exog=exog_no_cat)
+    assert forecaster.categorical_features_names_in_ == []
+    assert forecaster.estimator.get_params()[param_name] == default_value
+
+
+@pytest.mark.parametrize(
+    "estimator",
+    [
+        CatBoostClassifier(
+            iterations=10, random_seed=123, verbose=0,
+            allow_writing_files=False
+        ),
+        LGBMClassifier(verbose=-1, random_state=123),
+        XGBClassifier(random_state=123),
+        HistGradientBoostingClassifier(random_state=123),
+    ],
+    ids=['CatBoostClassifier', 'LGBMClassifier', 'XGBClassifier', 'HistGradientBoostingClassifier']
+)
+def test_fit_no_categoricals_with_supported_estimators(estimator):
+    """
+    Test that fit works correctly with supported estimators when
+    features_encoding='ordinal' and categorical_features=None
+    (no categorical encoding at all).
+    """
+    forecaster = ForecasterRecursiveClassifier(
+        estimator=estimator, lags=3,
+        features_encoding='ordinal',
+        categorical_features=None
+    )
+    forecaster.fit(y=y, exog=exog)
+
+    assert forecaster.is_fitted
+    assert forecaster.categorical_features_names_in_ is None
+
+
+def test_fit_with_interspersed_NaN_and_dropna_from_series_True():
+    """
+    Test fit works correctly with interspersed NaN in y and
+    dropna_from_series=True. Estimator: LogisticRegression.
+    """
+
+    y_nan = pd.Series(
+        data  = [1, 2, np.nan, 1, 2, 1, 2, 1, 2, 1],
+        name  = 'y',
+        dtype = float
+    )
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator          = LogisticRegression(),
+                     lags               = 3,
+                     dropna_from_series = True
+                 )
+
+    warn_msg = re.escape(
+        "NaNs detected in `X_train`. They have been dropped. If "
+        "you want to keep them, set `forecaster.dropna_from_series = False`. "
+        "Same rows have been removed from `y_train` to maintain alignment. "
+        "This is caused by interspersed NaNs in `y` or `exog`."
+    )
+    with pytest.warns(MissingValuesWarning, match=warn_msg):
+        forecaster.fit(y=y_nan)
+
+    assert forecaster.is_fitted
+    predictions = forecaster.predict(steps=3)
+
+    expected = pd.Series(
+                   data  = np.array([2.0, 1.0, 2.0]),
+                   index = pd.RangeIndex(start=10, stop=13, step=1),
+                   name  = 'pred'
+               )
+
+    pd.testing.assert_series_equal(predictions, expected)
+
+
+def test_fit_with_interspersed_NaN_and_dropna_from_series_False():
+    """
+    Test fit works correctly with interspersed NaN in y and
+    dropna_from_series=False. Estimator: HistGradientBoostingClassifier
+    (supports NaN natively).
+    """
+
+    y_nan = pd.Series(
+        data  = [1, 2, np.nan, 1, 2, 1, 2, 1, 2, 1],
+        name  = 'y',
+        dtype = float
+    )
+    forecaster = ForecasterRecursiveClassifier(
+                     estimator          = HistGradientBoostingClassifier(random_state=123),
+                     lags               = 3,
+                     dropna_from_series = False
+                 )
+
+    warn_msg = re.escape(
+        "NaNs detected in `X_train`. Some estimators do not allow "
+        "NaN values during training. If you want to drop them, "
+        "set `forecaster.dropna_from_series = True`."
+    )
+    with pytest.warns(MissingValuesWarning, match=warn_msg):
+        forecaster.fit(y=y_nan)
+
+    assert forecaster.is_fitted
+    predictions = forecaster.predict(steps=3)
+
+    expected = pd.Series(
+                   data  = np.array([1.0, 1.0, 1.0]),
+                   index = pd.RangeIndex(start=10, stop=13, step=1),
+                   name  = 'pred'
+               )
+
+    pd.testing.assert_series_equal(predictions, expected)

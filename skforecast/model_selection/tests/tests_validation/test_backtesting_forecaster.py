@@ -17,13 +17,14 @@ def test_backtesting_forecaster_TypeError_when_forecaster_not_supported_types():
     of the types supported by the function.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                    regressor = Ridge(random_state=123),
+                    estimator = Ridge(random_state=123),
                     lags      = 2
                  )
     forecaters_allowed = [
         'ForecasterRecursive', 
         'ForecasterDirect',
-        'ForecasterEquivalentDate'
+        'ForecasterEquivalentDate',
+        'ForecasterRecursiveClassifier'
     ]
     cv = TimeSeriesFold(
             steps                 = 3,
@@ -38,9 +39,9 @@ def test_backtesting_forecaster_TypeError_when_forecaster_not_supported_types():
             return_all_indexes    = False,
         )
     err_msg = re.escape(
-        f"`forecaster` must be of type {forecaters_allowed}, for all other types of "
-        f" forecasters use the functions available in the other `model_selection` "
-        f"modules."
+        f"`forecaster` must be of type {forecaters_allowed}. For all other "
+        f"types of forecasters use the other functions available in the "
+        f"`model_selection` module."
     )
     
     with pytest.raises(TypeError, match = err_msg):

@@ -1,8 +1,9 @@
 from .exceptions import (
     DataTypeWarning,
     DataTransformationWarning,
+    ExogenousInterpretationWarning,
     IgnoredArgumentWarning,
-    IndexWarning,
+    InputTypeWarning,
     LongTrainingWarning,
     MissingExogWarning,
     MissingValuesWarning,
@@ -11,6 +12,8 @@ from .exceptions import (
     UnknownLevelWarning,
     SaveLoadSkforecastWarning,
     SkforecastVersionWarning,
+    FeatureOutOfRangeWarning,
     warn_skforecast_categories,
-    set_warnings_style
+    set_warnings_style,
+    runtime_deprecated
 )

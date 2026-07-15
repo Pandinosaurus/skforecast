@@ -4,7 +4,8 @@ import re
 import pytest
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from skforecast.preprocessing import RollingFeatures
+from sklearn.preprocessing import OrdinalEncoder
+from skforecast.preprocessing import RollingFeatures, CalendarFeatures
 from skforecast.direct import ForecasterDirectMultiVariate
 
 
@@ -15,7 +16,9 @@ def test_init_TypeError_when_level_is_not_a_str():
     level = 5
     err_msg = re.escape(f"`level` argument must be a str. Got {type(level)}.")
     with pytest.raises(TypeError, match = err_msg):
-        ForecasterDirectMultiVariate(LinearRegression(), level=level, lags=2, steps=3)
+        ForecasterDirectMultiVariate(
+            estimator=LinearRegression(), level=level, lags=2, steps=3
+        )
 
 
 def test_init_TypeError_when_steps_is_not_int():
@@ -28,7 +31,9 @@ def test_init_TypeError_when_steps_is_not_int():
         f"Got {type(steps)}."
     )
     with pytest.raises(TypeError, match = err_msg):
-        ForecasterDirectMultiVariate(LinearRegression(), level='l1', lags=2, steps=steps)
+        ForecasterDirectMultiVariate(
+            estimator=LinearRegression(), level='l1', lags=2, steps=steps
+        )
 
 
 def test_init_ValueError_when_steps_is_less_than_1():
@@ -38,7 +43,9 @@ def test_init_ValueError_when_steps_is_less_than_1():
     steps = 0
     err_msg = re.escape(f"`steps` argument must be greater than or equal to 1. Got {steps}.")
     with pytest.raises(ValueError, match = err_msg):
-        ForecasterDirectMultiVariate(LinearRegression(), level='l1', lags=2, steps=steps)
+        ForecasterDirectMultiVariate(
+            estimator=LinearRegression(), level='l1', lags=2, steps=steps
+        )
 
 
 @pytest.mark.parametrize("lags", 
@@ -55,7 +62,7 @@ def test_init_ValueError_when_no_lags_or_window_features(lags):
     )
     with pytest.raises(ValueError, match = err_msg):
         ForecasterDirectMultiVariate(
-            regressor       = LinearRegression(),
+            estimator       = LinearRegression(),
             level           = 'l1',
             steps           = 3,
             lags            = lags,
@@ -79,7 +86,7 @@ def test_init_window_size_correctly_stored(lags, window_features, expected):
         )
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      level           = 'l1',
                      steps           = 3,
                      lags            = lags,
@@ -103,6 +110,37 @@ def test_init_window_size_correctly_stored(lags, window_features, expected):
         assert forecaster.window_features_class_names is None
 
 
+@pytest.mark.parametrize("include_calendar", 
+                         [True, False], 
+                         ids = lambda cf: f'include_calendar: {cf}')
+def test_init_calendar_features_correctly_stored(include_calendar):
+    """
+    Test calendar_features is correctly stored when passed.
+    """
+    if include_calendar:
+        calendar_features = CalendarFeatures(features=None)
+    else:
+        calendar_features = None
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator         = LinearRegression(),
+                     level             = 'l1',
+                     steps             = 3,
+                     lags              = 5,
+                     calendar_features = calendar_features
+                 )
+    
+    if calendar_features:
+        assert isinstance(forecaster.calendar_features, CalendarFeatures)
+        assert forecaster.calendar_features_names == [
+            "year", "month", "week", "day_of_week", "day_of_month",
+            "day_of_year", "weekend", "hour", "minute", "second", "quarter",
+        ]
+    else:
+        assert forecaster.calendar_features is None
+        assert forecaster.calendar_features_names is None
+
+
 @pytest.mark.parametrize("lags, expected",
     [({'l1': 3, 'l2': 5}, {'l1': np.array([1, 2, 3]), 'l2': np.array([1, 2, 3, 4, 5])}), 
      ({'l1': None, 'l2': 5}, {'l1': None, 'l2': np.array([1, 2, 3, 4, 5])}),
@@ -114,7 +152,7 @@ def test_init_max_lag_stored_when_dict(lags, expected):
     """
 
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', lags=lags, steps=2
+        estimator=LinearRegression(), level='l1', lags=lags, steps=2
     )
     
     for k in forecaster.lags:
@@ -140,7 +178,7 @@ def test_init_when_lags_dict_with_all_None(lags):
     )
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      level           = 'l1',
                      steps           = 3,
                      lags            = lags,
@@ -158,7 +196,7 @@ def test_init_when_lags_dict_with_all_None(lags):
 @pytest.mark.parametrize("dif", 
                          [0, 0.5, 1.5, 'not_int'], 
                          ids = lambda dif: f'differentiation: {dif}')
-def test_init_ValueError_when_differentiation_argument_is_not_int_or_greater_than_0(dif):
+def test_init_ValueError_when_differentiation_is_not_int_or_greater_than_0(dif):
     """
     Test ValueError is raised when differentiation is not an int or greater than 0.
     """
@@ -168,7 +206,7 @@ def test_init_ValueError_when_differentiation_argument_is_not_int_or_greater_tha
     )
     with pytest.raises(ValueError, match = err_msg):
         ForecasterDirectMultiVariate(
-            regressor       = LinearRegression(),
+            estimator       = LinearRegression(),
             level           = 'l1',
             steps           = 3,
             lags            = 5,
@@ -184,7 +222,7 @@ def test_init_window_size_is_increased_when_differentiation(dif):
     Test window_size is increased when including differentiation.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor       = LinearRegression(),
+                     estimator       = LinearRegression(),
                      level           = 'l1',
                      steps           = 3,
                      lags            = 5,
@@ -206,5 +244,83 @@ def test_init_TypeError_when_n_jobs_not_int_or_auto(n_jobs):
     err_msg = re.escape(f"`n_jobs` must be an integer or `'auto'`. Got {type(n_jobs)}.")
     with pytest.raises(TypeError, match = err_msg):
         ForecasterDirectMultiVariate(
-            LinearRegression(), level='l1', steps=2, lags=2, n_jobs=n_jobs
+            estimator=LinearRegression(), level='l1', steps=2, lags=2, n_jobs=n_jobs
         )
+
+
+@pytest.mark.parametrize("categorical_features", 
+                         [True, 5, 'not_auto'], 
+                         ids = lambda cf: f'categorical_features: {cf}')
+def test_init_ValueError_when_categorical_features_is_not_auto_list_or_None(categorical_features):
+    """
+    Test ValueError is raised when categorical_features is not 'auto', list, or None.
+    """
+    err_msg = re.escape(
+        f"Argument `categorical_features` must be `'auto'`, a list of "
+        f"column names, or `None`. Got {categorical_features}."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterDirectMultiVariate(
+            estimator            = LinearRegression(),
+            level                = 'l1',
+            steps                = 3,
+            lags                 = 5,
+            categorical_features = categorical_features
+        )
+
+
+def test_init_ValueError_when_categorical_features_is_empty_list():
+    """
+    Test ValueError is raised when categorical_features is an empty list.
+    """
+    err_msg = re.escape(
+        "Argument `categorical_features` must not be an empty list. "
+        "Use `None` to disable categorical encoding."
+    )
+    with pytest.raises(ValueError, match = err_msg):
+        ForecasterDirectMultiVariate(
+            estimator            = LinearRegression(),
+            level                = 'l1',
+            steps                = 3,
+            lags                 = 5,
+            categorical_features = []
+        )
+
+
+@pytest.mark.parametrize("categorical_features", 
+                         ['auto', ['col_1', 'col_2'], None], 
+                         ids = lambda cf: f'categorical_features: {cf}')
+def test_init_categorical_features_correctly_stored(categorical_features):
+    """
+    Test categorical_features is correctly stored when 'auto', list, or None.
+    """
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator            = LinearRegression(),
+                     level                = 'l1',
+                     steps                = 3,
+                     lags                 = 5,
+                     categorical_features = categorical_features
+                 )
+    
+    assert forecaster.categorical_features == categorical_features
+    assert forecaster.categorical_features_names_in_ is None
+    assert isinstance(forecaster.categorical_encoder, OrdinalEncoder)
+
+
+@pytest.mark.parametrize(
+    'dropna_from_series',
+    [True, False],
+    ids=lambda d: f'dropna_from_series: {d}'
+)
+def test_init_dropna_from_series_attribute_correctly_stored(dropna_from_series):
+    """
+    Test dropna_from_series is correctly stored when True or False.
+    """
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(),
+        level='l1',
+        steps=3,
+        lags=5,
+        dropna_from_series=dropna_from_series
+    )
+    assert forecaster.dropna_from_series == dropna_from_series

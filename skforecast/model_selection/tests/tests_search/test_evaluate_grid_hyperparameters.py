@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error
 from sklearn.model_selection import ParameterGrid
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, ElasticNet
 from sklearn.preprocessing import StandardScaler
 from skforecast.metrics import mean_absolute_scaled_error, root_mean_squared_scaled_error
 from skforecast.exceptions import OneStepAheadValidationWarning
@@ -37,7 +37,7 @@ def test_TypeError_evaluate_grid_hyperparameters_when_cv_not_valid():
 
     cv = DummyCV()
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     
@@ -64,10 +64,11 @@ def test_ValueError_evaluate_grid_hyperparameters_when_return_best_and_len_y_exo
     and length of `y` and `exog` do not match.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
-    exog = y[:30]
+    exog_short = y[:30]
+    
     cv = TimeSeriesFold(
             steps                 = 3,
             initial_train_size    = len(y[:-12]),
@@ -80,21 +81,22 @@ def test_ValueError_evaluate_grid_hyperparameters_when_return_best_and_len_y_exo
             allow_incomplete_fold = True,
             return_all_indexes    = False,
         )
+    
     err_msg = re.escape(
-        (f"`exog` must have same number of samples as `y`. "
-         f"length `exog`: ({len(exog)}), length `y`: ({len(y)})")
+        f"`exog` must have same number of samples as `y`. "
+        f"length `exog`: ({len(exog_short)}), length `y`: ({len(y)})"
     )
     with pytest.raises(ValueError, match = err_msg):
         _evaluate_grid_hyperparameters(
             forecaster  = forecaster,
             y           = y,
-            exog        = exog,
+            exog        = exog_short,
             cv          = cv,
             lags_grid   = [2, 4],
             param_grid  = [{'alpha': 0.01}, {'alpha': 0.1}, {'alpha': 1}],
             metric      = 'mean_absolute_error',
             return_best = True,
-            verbose     = False
+            verbose     = True
         )
 
 
@@ -104,7 +106,7 @@ def test_ValueError_evaluate_grid_hyperparameters_metric_list_duplicate_names():
     metrics is used with duplicate names.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     cv = TimeSeriesFold(
@@ -133,13 +135,122 @@ def test_ValueError_evaluate_grid_hyperparameters_metric_list_duplicate_names():
         )
 
 
+def test_grid_hyperparameters_results_warn_when_non_valid_params():
+    """
+    Test that a warning is raised when non valid params are included in param_grid.
+    """
+
+    param_grid = {
+        "alpha": [0.1],
+        "l1_ratio": [0.5, 10],  # 10 is not valid for ElasticNet
+    }
+    param_grid = list(ParameterGrid(param_grid))
+    cv = TimeSeriesFold(steps=12, initial_train_size=30, refit=False)
+    forecaster = ForecasterRecursive(estimator=ElasticNet(), lags=5)
+
+    msg = re.escape(
+        "Parameters skipped: {'alpha': 0.1, 'l1_ratio': 10}. The 'l1_ratio' "
+        "parameter of ElasticNet must be a float in the range [0.0, 1.0]. "
+        "Got 10 instead."
+    )
+    with pytest.warns(RuntimeWarning, match=msg):
+        results = _evaluate_grid_hyperparameters(
+            forecaster=forecaster,
+            y=y,
+            param_grid=param_grid,
+            cv=cv,
+            metric="mean_squared_error",
+            return_best=True,
+            n_jobs="auto",
+            verbose=True,
+            show_progress=False,
+        )
+
+    expected_results = pd.DataFrame(
+        {
+            "lags": {0: np.array([1, 2, 3, 4, 5])},
+            "lags_label": {0: np.array([1, 2, 3, 4, 5])},
+            "params": {0: {"alpha": 0.1, "l1_ratio": 0.5}},
+            "mean_squared_error": {0: 0.061178815481733415},
+            "alpha": {0: 0.1},
+            "l1_ratio": {0: 0.5},
+        }
+    )
+    pd.testing.assert_frame_equal(results, expected_results)
+
+
+def test_evaluate_grid_hyperparameters_warns_when_all_params_raise_exceptions():
+    """
+    Test that a RuntimeWarning is raised and an empty DataFrame is returned
+    when all parameter combinations in param_grid are invalid and raise
+    exceptions during evaluation.
+    """
+    # All l1_ratio values are invalid for ElasticNet (must be in [0.0, 1.0])
+    param_grid = [
+        {"alpha": 0.1, "l1_ratio": 10},
+        {"alpha": 0.5, "l1_ratio": 20},
+    ]
+    cv = TimeSeriesFold(steps=12, initial_train_size=30, refit=False)
+    forecaster = ForecasterRecursive(estimator=ElasticNet(), lags=5)
+
+    warn_msg = re.escape(
+        "No valid parameter combinations found. All combinations raised exceptions."
+    )
+    with pytest.warns(RuntimeWarning, match=warn_msg):
+        results = _evaluate_grid_hyperparameters(
+            forecaster    = forecaster,
+            y             = y,
+            param_grid    = param_grid,
+            cv            = cv,
+            metric        = "mean_squared_error",
+            return_best   = False,
+            n_jobs        = "auto",
+            verbose       = False,
+            show_progress = False,
+        )
+
+    assert results.empty
+    assert isinstance(results, pd.DataFrame)
+
+
+def test_evaluate_grid_hyperparameters_warns_when_all_params_raise_exceptions_OneStepAheadFold():
+    """
+    Test that a RuntimeWarning is raised and an empty DataFrame is returned
+    when all parameter combinations raise exceptions with OneStepAheadFold.
+    """
+    param_grid = [
+        {"alpha": 0.1, "l1_ratio": 10},
+        {"alpha": 0.5, "l1_ratio": 20},
+    ]
+    cv = OneStepAheadFold(initial_train_size=30)
+    forecaster = ForecasterRecursive(estimator=ElasticNet(), lags=5)
+
+    warn_msg = re.escape(
+        "No valid parameter combinations found. All combinations raised exceptions."
+    )
+    with pytest.warns(RuntimeWarning, match=warn_msg):
+        results = _evaluate_grid_hyperparameters(
+            forecaster    = forecaster,
+            y             = y,
+            param_grid    = param_grid,
+            cv            = cv,
+            metric        = "mean_squared_error",
+            return_best   = False,
+            verbose       = False,
+            show_progress = False,
+        )
+
+    assert results.empty
+    assert isinstance(results, pd.DataFrame)
+
+
 def test_output_evaluate_grid_hyperparameters_ForecasterRecursive_with_mocked():
     """
     Test output of _evaluate_grid_hyperparameters in ForecasterRecursive with mocked
     (mocked done in Skforecast v0.4.3).
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2 
                  )
     n_validation = 12
@@ -211,7 +322,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursive_with_window_fe
         window_sizes = 3,
     )
     forecaster = ForecasterRecursive(
-                     regressor       = Ridge(random_state=123),
+                     estimator       = Ridge(random_state=123),
                      lags            = 2, 
                      window_features = window_features,
                  )
@@ -281,7 +392,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursive_with_different
     (mocked done in Skforecast v0.10.0) when differentiation is used.
     """
     forecaster = ForecasterRecursive(
-                     regressor       = Ridge(random_state=123),
+                     estimator       = Ridge(random_state=123),
                      lags            = 2,
                      differentiation = 1
                  )
@@ -351,7 +462,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursive_lags_grid_dict
     `lags_grid` is a dict with mocked (mocked done in Skforecast v0.4.3).
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     n_validation = 12
@@ -413,7 +524,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursive_lags_grid_is_N
     should use forecaster.lags as lags_grid.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     n_validation = 12
@@ -464,7 +575,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterRecursive_metric_list_wi
     and multiple metrics (mocked done in Skforecast v0.4.3).
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     n_validation = 12
@@ -538,7 +649,7 @@ def test_evaluate_grid_hyperparameters_when_return_best_ForecasterRecursive(lags
     _evaluate_grid_hyperparameters with ForecasterRecursive.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     n_validation = 12
@@ -565,14 +676,14 @@ def test_evaluate_grid_hyperparameters_when_return_best_ForecasterRecursive(lags
         param_grid  = param_grid,
         metric      = 'mean_squared_error',
         return_best = True,
-        verbose     = False
+        verbose     = True
     )
     
     expected_lags = np.array([1, 2])
     expected_alpha = 0.01
     
     assert (expected_lags == forecaster.lags).all()
-    assert expected_alpha == forecaster.regressor.alpha
+    assert expected_alpha == forecaster.estimator.alpha
 
 
 @pytest.mark.parametrize("lags_grid", 
@@ -584,7 +695,7 @@ def test_evaluate_grid_hyperparameters_when_return_best_and_list_metrics(lags_gr
     and multiple metrics.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2
                  )
     n_validation = 12
@@ -619,7 +730,7 @@ def test_evaluate_grid_hyperparameters_when_return_best_and_list_metrics(lags_gr
     expected_alpha = 1.
     
     assert (expected_lags == forecaster.lags).all()
-    assert expected_alpha == forecaster.regressor.alpha
+    assert expected_alpha == forecaster.estimator.alpha
 
 
 def test_evaluate_grid_hyperparameters_output_file_when_single_metric():
@@ -628,7 +739,7 @@ def test_evaluate_grid_hyperparameters_output_file_when_single_metric():
     _evaluate_grid_hyperparameters and single metric.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2 
                  )
     n_validation = 12
@@ -677,7 +788,7 @@ def test_evaluate_grid_hyperparameters_output_file_when_single_metric_as_list():
     _evaluate_grid_hyperparameters and single metric as list.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2 
                  )
 
@@ -727,7 +838,7 @@ def test_evaluate_grid_hyperparameters_output_file_when_2_metrics_as_list():
     _evaluate_grid_hyperparameters and 2 metrics as list.
     """
     forecaster = ForecasterRecursive(
-                     regressor = Ridge(random_state=123),
+                     estimator = Ridge(random_state=123),
                      lags      = 2 
                  )
 
@@ -782,7 +893,7 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirect_with_window_featu
         window_sizes = 3,
     )
     forecaster = ForecasterDirect(
-                     regressor       = Ridge(random_state=123),
+                     estimator       = Ridge(random_state=123),
                      steps           = 3,
                      lags            = 2, 
                      window_features = window_features,
@@ -848,33 +959,33 @@ def test_output_evaluate_grid_hyperparameters_ForecasterDirect_with_window_featu
 
 
 @pytest.mark.parametrize("initial_train_size", 
-                         [100, '2020-01-05 03:00:00', pd.to_datetime('2020-01-05 03:00:00')], 
+                         [450, '2020-01-19 17:00:00', pd.to_datetime('2020-01-19 17:00:00')], 
                          ids=lambda initial_train_size: f'initial_train_size: {initial_train_size}')
 @pytest.mark.parametrize(
         "forecaster",
         [
             ForecasterRecursive(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 lags=3,
                 transformer_y=None,
                 forecaster_id='Recursive_no_transformer'
             ),
             ForecasterDirect(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 steps=1,
                 lags=3,
                 transformer_y=None,
                 forecaster_id='Direct_no_transformer'
             ),
             ForecasterRecursive(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 lags=3,
                 transformer_y=StandardScaler(),
                 transformer_exog=StandardScaler(),
                 forecaster_id='Recursive_transformers'
             ),
             ForecasterDirect(
-                regressor=Ridge(random_state=678),
+                estimator=Ridge(random_state=678),
                 steps=1,
                 lags=3,
                 transformer_y=StandardScaler(),
@@ -900,7 +1011,7 @@ def test_evaluate_grid_hyperparameters_equivalent_outputs_backtesting_one_step_a
     param_grid = {
         "alpha": np.logspace(-3, 3, 2),
     }
-    lags_grid = [3, 5, 7]
+    lags_grid = [3, 7]
     param_grid = list(ParameterGrid(param_grid))
     cv_backtesnting = TimeSeriesFold(
             steps                 = 1,

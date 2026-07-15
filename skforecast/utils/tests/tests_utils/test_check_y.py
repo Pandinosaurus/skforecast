@@ -7,23 +7,34 @@ import pandas as pd
 from skforecast.utils import check_y
 
 
-@pytest.mark.parametrize("y", 
-                         [10, [1, 2, 3], np.arange(10).reshape(-1, 1)], 
-                         ids = lambda y : f'y: {y}'
-                        )
+@pytest.mark.parametrize(
+    "y", 
+    [10, [1, 2, 3], np.arange(10).reshape(-1, 1)], 
+    ids = lambda y: f'y: {y}'
+)
 def test_check_y_exception_when_y_not_pandas_series(y):
     """
     Check exception is raised when y is not a pandas Series.
     """
-    err_msg = re.escape('`y` must be a pandas Series.')
-    with pytest.raises(TypeError, match = err_msg):
+    err_msg = re.escape(
+        f"`y` must be a pandas Series with a DatetimeIndex or a RangeIndex. "
+        f"Found {type(y)}."
+    )
+    with pytest.raises(TypeError, match=err_msg):
         check_y(y=y)
 
 
 def test_check_y_exception_when_y_has_missing_values():
     """
-    Check exception is raised when y has missing values.
+    Check exception is raised when y has missing values (default allow_nan=False).
     """
     err_msg = re.escape('`y` has missing values.')
     with pytest.raises(ValueError, match = err_msg):
-        check_y(pd.Series([0, 1, None]))
+        check_y(pd.Series([0, 1, np.nan]), allow_nan=False)
+
+
+def test_check_y_no_error_when_y_has_missing_values_and_allow_nan_true():
+    """
+    Check no exception is raised when y has missing values and allow_nan=True.
+    """
+    check_y(pd.Series([0, 1, np.nan]), allow_nan=True)

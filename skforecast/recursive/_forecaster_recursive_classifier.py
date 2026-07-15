@@ -1,0 +1,2211 @@
+################################################################################
+#                           ForecasterRecursiveClassifier                      #
+#                                                                              #
+# This work by skforecast team is licensed under the BSD 3-Clause License.     #
+################################################################################
+# coding=utf-8
+
+from __future__ import annotations
+from typing import Callable, Any
+import warnings
+import sys
+import numpy as np
+import pandas as pd
+from sklearn.exceptions import NotFittedError
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.base import clone
+
+import skforecast
+from ..base import ForecasterBase
+from ..exceptions import DataTransformationWarning, MissingValuesWarning
+from ..utils import (
+    initialize_lags,
+    initialize_window_features,
+    initialize_weights,    
+    check_select_fit_kwargs,
+    check_y,
+    check_exog,
+    get_exog_dtypes,
+    check_exog_dtypes,
+    check_predict_input,
+    check_extract_values_and_index,
+    configure_estimator_categorical_features,
+    cast_catboost_categorical_columns,
+    input_to_frame,
+    date_to_index_position,
+    expand_index,
+    transform_dataframe,
+    get_style_repr_html,
+    set_cpu_gpu_device,
+    manage_warnings
+)
+
+
+class ForecasterRecursiveClassifier(ForecasterBase):
+    """
+    This class turns any classification estimator compatible with the scikit-learn 
+    API into a recursive autoregressive (multi-step) forecaster.
+    
+    Parameters
+    ----------
+    estimator : estimator or pipeline compatible with the scikit-learn API
+        An instance of an estimator or pipeline compatible with the scikit-learn API.
+    lags : int, list, numpy ndarray, range, default None
+        Lags used as predictors. Index starts at 1, so lag 1 is equal to t-1.
+    
+        - `int`: include lags from 1 to `lags` (included).
+        - `list`, `1d numpy ndarray` or `range`: include only lags present in 
+        `lags`, all elements must be int.
+        - `None`: no lags are included as predictors. 
+    window_features : object, list, default None
+        Instance or list of instances used to create window features. Window features
+        are created from the original time series and are included as predictors.
+        Skforecast provides the `RollingFeatures` class, but a custom object can
+        also be passed as long as it implements the required interface.
+    features_encoding : str, default 'auto'
+        Encoding method for features derived from the time series (lags and 
+        window features that return class values):
+        
+        - 'auto': Use categorical dtype if estimator supports native categorical
+        features (LightGBM, CatBoost, XGBoost), otherwise numeric encoding.
+        - 'categorical': Force categorical dtype (requires compatible estimator).
+        - 'ordinal': Use ordinal encoding (0, 1, 2, ...). The estimator will 
+        treat class codes as numeric values, assuming an ordinal relationship 
+        between classes (e.g., 'low' < 'medium' < 'high').
+        
+        Note: This only affects features derived from the target series (y) not 
+        exogenous variables.
+    transformer_exog : object transformer (preprocessor), default None
+        An instance of a transformer (preprocessor) compatible with the scikit-learn
+        preprocessing API. The transformation is applied to `exog` before training the
+        forecaster. `inverse_transform` is not available when using ColumnTransformers.
+    categorical_features : str, list, default 'auto'
+        Specifies which exogenous variables should be treated as categorical
+        by the estimator's native categorical feature handling.
+ 
+        - 'auto': Automatically detect categorical columns (non-numeric, non-bool)
+        after `transformer_exog`.
+        - list: Explicit list of column names to treat as categorical.
+        - None: No categorical feature handling for exogenous variables.
+    weight_func : Callable, default None
+        Function that defines the individual weights for each sample based on the
+        index. For example, a function that assigns a lower weight to certain dates.
+        Ignored if `estimator` does not have the argument `sample_weight` in its `fit`
+        method. The resulting `sample_weight` cannot have negative values.
+    dropna_from_series : bool, default False
+        Determine whether NaN detected in the training matrices will be dropped.
+        Relevant when `y` or `exog` contain interspersed NaN values.
+
+        - If `True`, drop NaNs in `X_train` and same rows in `y_train`.
+        - If `False`, leave NaNs in `X_train` and warn the user.
+    fit_kwargs : dict, default None
+        Additional arguments to be passed to the `fit` method of the estimator.
+    forecaster_id : str, int, default None
+        Name used as an identifier of the forecaster.
+    
+    Attributes
+    ----------
+    estimator : estimator or pipeline compatible with the scikit-learn API
+        An instance of an estimator or pipeline compatible with the scikit-learn API.
+    lags : numpy ndarray
+        Lags used as predictors.
+    lags_names : list
+        Names of the lags used as predictors.
+    max_lag : int
+        Maximum lag included in `lags`.
+    window_features : list
+        Class or list of classes used to create window features.
+    window_features_names : list
+        Names of the window features to be included in the `X_train` matrix.
+    window_features_class_names : list
+        Names of the classes used to create the window features.
+    max_size_window_features : int
+        Maximum window size required by the window features.
+    window_size : int
+        The window size needed to create the predictors. It is calculated as the 
+        maximum value between `max_lag` and `max_size_window_features`.
+    features_encoding : str
+        Encoding method for features derived from the time series (lags and 
+        window features that return class values).
+    use_native_categoricals : bool
+        Indicates whether the estimator supports native categorical features.
+    classes_ : list
+        List of class labels seen during training.
+    class_codes_ : list
+        List of class codes assigned by the `OrdinalEncoder` during training.
+    n_classes_ : int
+        Number of classes seen during training.
+    encoder : OrdinalEncoder
+        Instance of `OrdinalEncoder` used to encode target variable class labels.
+    encoding_mapping_ : dict
+        Mapping of original class labels to encoded values.
+    code_to_class_mapping_ : dict
+        Mapping of encoded values to original class labels.
+    transformer_exog : object transformer (preprocessor)
+        An instance of a transformer (preprocessor) compatible with the scikit-learn
+        preprocessing API. The transformation is applied to `exog` before training the
+        forecaster. `inverse_transform` is not available when using ColumnTransformers.
+    categorical_features : str, list
+        Specifies which exogenous variables should be treated as categorical.
+    categorical_features_names_in_ : list
+        Names of the exogenous variables considered as categorical during training.
+    categorical_encoder : OrdinalEncoder
+        Instance of `OrdinalEncoder` used to encode categorical exogenous variables.
+    weight_func : Callable
+        Function that defines the individual weights for each sample based on the
+        index. For example, a function that assigns a lower weight to certain dates.
+        Ignored if `estimator` does not have the argument `sample_weight` in its `fit`
+        method. The resulting `sample_weight` cannot have negative values.
+    source_code_weight_func : str
+        Source code of the custom function used to create weights.
+    dropna_from_series : bool
+        Determine whether NaN detected in the training matrices will be dropped.
+    last_window_ : pandas DataFrame
+        This window represents the most recent data observed by the predictor
+        during its training phase. It contains the values needed to predict the
+        next step immediately after the training data. These values are stored
+        in the original scale of the time series before undergoing any transformation.
+    index_type_ : type
+        Type of index of the input used in training.
+    index_freq_ : str
+        Frequency of Index of the input used in training.
+    training_range_ : pandas Index
+        First and last values of index of the data used during training.
+    series_name_in_ : str
+        Name of the series provided by the user during training.
+    exog_in_ : bool
+        If the forecaster has been trained using exogenous variable/s.
+    exog_names_in_ : list
+        Names of the exogenous variables used during training.
+    exog_type_in_ : type
+        Type of exogenous data (pandas Series or DataFrame) used in training.
+    exog_dtypes_in_ : dict
+        Type of each exogenous variable/s used in training before the transformation
+        applied by `transformer_exog`. If `transformer_exog` is not used, it
+        is equal to `exog_dtypes_out_`.
+    exog_dtypes_out_ : dict
+        Type of each exogenous variable/s used in training after the transformation 
+        applied by `transformer_exog`. If `transformer_exog` is not used, it 
+        is equal to `exog_dtypes_in_`.
+    X_train_window_features_names_out_ : list
+        Names of the window features included in the matrix `X_train` created
+        internally for training.
+    X_train_exog_names_out_ : list
+        Names of the exogenous variables included in the matrix `X_train` created
+        internally for training. It can be different from `exog_names_in_` if
+        some exogenous variables are transformed during the training process.
+    X_train_features_names_out_ : list
+        Names of columns of the matrix created internally for training.
+    fit_kwargs : dict
+        Additional arguments to be passed to the `fit` method of the estimator.
+    creation_date : str
+        Date of creation.
+    is_fitted : bool
+        Tag to identify if the estimator has been fitted (trained).
+    fit_date : str
+        Date of last fit.
+    skforecast_version : str
+        Version of skforecast library used to create the forecaster.
+    python_version : str
+        Version of python used to create the forecaster.
+    forecaster_id : str, int
+        Name used as an identifier of the forecaster.
+    __skforecast_tags__ : dict
+        Tags associated with the forecaster.
+    _probabilistic_mode: str, bool
+        Private attribute used to indicate whether the forecaster should perform 
+        some calculations during backtesting.
+    transformer_y : Ignored
+        Not used, present here for API consistency by convention.
+    differentiation : Ignored
+        Not used, present here for API consistency by convention.
+    differentiation_max : Ignored
+        Not used, present here for API consistency by convention.
+
+    Notes
+    -----
+    **`features_encoding`:**
+    Controls how features derived from the target series (lags and window
+    features that return class values) are treated by the estimator. When set
+    to `'auto'` or `'categorical'`, the encoded class codes (integers) are
+    communicated as categorical to the estimator's native categorical handling
+    (e.g., LightGBM, CatBoost). When set to `'ordinal'`, they are treated as
+    numeric values.
+    Related attributes: `encoder` (`OrdinalEncoder`), `encoding_mapping_`, 
+    `code_to_class_mapping_`, `classes_`, `class_codes_`, `n_classes_`.
+
+    **`categorical_features`:**
+    Controls which exogenous variables should be treated as categorical. These
+    columns are encoded and their indices are combined with the lag indices
+    when configuring the estimator's native categorical handling.
+    Related attributes: `categorical_encoder` (`OrdinalEncoder`), 
+    `categorical_features_names_in_`.
+
+    All exogenous categorical management **must** be done through this
+    parameter. Setting categorical features directly on the estimator or via
+    `fit_kwargs` is not supported, as the forecaster always overwrites
+    the estimator's categorical configuration during `fit` to include both
+    autoregressive and exogenous categorical indices.
+
+    **Difference between `features_encoding` and `categorical_features`:**
+
+    - `features_encoding`: Applies to features derived from the **target
+    series** (lags and window features that return class codes).
+    - `categorical_features`: Applies to **exogenous variables** (`exog`).
+    
+    """
+
+    def __init__(
+        self,
+        estimator: object,
+        lags: int | list[int] | np.ndarray[int] | range[int] | None = None,
+        window_features: object | list[object] | None = None,
+        features_encoding: str = 'auto',
+        transformer_exog: object | None = None,
+        categorical_features: str | list[str] | None = 'auto',
+        weight_func: Callable | None = None,
+        dropna_from_series: bool = False,
+        fit_kwargs: dict[str, object] | None = None,
+        forecaster_id: str | int | None = None
+    ) -> None:
+        
+        self.estimator                          = clone(estimator)
+        self.transformer_exog                   = transformer_exog
+        self.categorical_features               = categorical_features
+        self.weight_func                        = weight_func
+        self.source_code_weight_func            = None
+        self.dropna_from_series                 = dropna_from_series
+        self.last_window_                       = None
+        self.index_type_                        = None
+        self.index_freq_                        = None
+        self.training_range_                    = None
+        self.series_name_in_                    = None
+        self.exog_in_                           = False
+        self.exog_names_in_                     = None
+        self.exog_type_in_                      = None
+        self.exog_dtypes_in_                    = None
+        self.exog_dtypes_out_                   = None
+        self.X_train_window_features_names_out_ = None
+        self.X_train_exog_names_out_            = None
+        self.X_train_features_names_out_        = None
+        self.categorical_features_names_in_     = None
+        self.creation_date                      = pd.Timestamp.today().strftime('%Y-%m-%d %H:%M:%S')
+        self.is_fitted                          = False
+        self.fit_date                           = None
+        self.skforecast_version                 = skforecast.__version__
+        self.python_version                     = sys.version.split(" ")[0]
+        self.forecaster_id                      = forecaster_id
+        self._probabilistic_mode                = False  # NOTE: Ignored in this forecaster
+        self.transformer_y                      = None  # NOTE: Ignored in this forecaster
+        self.differentiation                    = None  # NOTE: Ignored in this forecaster
+        self.differentiation_max                = None  # NOTE: Ignored in this forecaster
+
+        self.features_encoding                  = features_encoding
+        self.use_native_categoricals            = False
+        self.classes_                           = None
+        self.class_codes_                       = None
+        self.n_classes_                         = None
+        self.encoding_mapping_                  = None
+        self.code_to_class_mapping_             = None
+
+        valid_encodings = ['auto', 'categorical', 'ordinal']
+        if features_encoding not in valid_encodings:
+            raise ValueError(
+                f"`features_encoding` must be one of {valid_encodings}. "
+                f"Got '{features_encoding}'."
+            )
+        
+        supports_categorical = self._check_categorical_support(estimator)
+        if features_encoding == 'categorical':
+            if supports_categorical:
+                self.use_native_categoricals = True
+            else:
+                raise ValueError(
+                    f"`features_encoding='categorical'` requires a estimator that "
+                    f"supports native categorical features (LightGBM, CatBoost, XGBoost). "
+                    f"Got {type(estimator).__name__}. Use 'auto' or 'ordinal' instead."
+                )
+        elif features_encoding == 'auto':
+            if supports_categorical:
+                self.use_native_categoricals = True
+
+        self.encoder = OrdinalEncoder(
+                           categories = 'auto',
+                           dtype      = int
+                       )
+
+        self.lags, self.lags_names, self.max_lag = initialize_lags(type(self).__name__, lags)
+        self.lags_are_contiguous = (
+            self.lags is not None
+            and np.array_equal(self.lags, np.arange(1, self.max_lag + 1))
+        )
+        self.window_features, self.window_features_names, self.max_size_window_features = (
+            initialize_window_features(window_features)
+        )
+        if self.window_features is None and self.lags is None:
+            raise ValueError(
+                "At least one of the arguments `lags` or `window_features` "
+                "must be different from None. This is required to create the "
+                "predictors used in training the forecaster."
+            )
+        
+        self.window_size = max(
+            [ws for ws in [self.max_lag, self.max_size_window_features] 
+             if ws is not None]
+        )
+        self.window_features_class_names = None
+        if window_features is not None:
+            self.window_features_class_names = [
+                type(wf).__name__ for wf in self.window_features
+            ]
+
+        if categorical_features is not None:
+            if not (
+                (isinstance(categorical_features, str) and categorical_features == 'auto')
+                or isinstance(categorical_features, list)
+            ):
+                raise ValueError(
+                    f"Argument `categorical_features` must be `'auto'`, a list of "
+                    f"column names, or `None`. Got {categorical_features}."
+                )
+            if isinstance(categorical_features, list):
+                if len(categorical_features) == 0:
+                    raise ValueError(
+                        "Argument `categorical_features` must not be an empty list. "
+                        "Use `None` to disable categorical encoding."
+                    )
+
+        self.categorical_encoder = OrdinalEncoder(
+                                       dtype                 = float,
+                                       handle_unknown        = 'use_encoded_value',
+                                       unknown_value         = np.nan,
+                                       encoded_missing_value = np.nan
+                                   ).set_output(transform="pandas")
+
+        self.weight_func, self.source_code_weight_func, _ = initialize_weights(
+            forecaster_name = type(self).__name__, 
+            estimator       = estimator, 
+            weight_func     = weight_func, 
+            series_weights  = None
+        )
+
+        self.fit_kwargs = check_select_fit_kwargs(
+                              estimator  = estimator,
+                              fit_kwargs = fit_kwargs
+                          )
+        
+        self.__skforecast_tags__ = {
+            "library": "skforecast",
+            "forecaster_name": "ForecasterRecursiveClassifier",
+            "forecaster_task": "classification",
+            "forecasting_scope": "single-series",  # single-series | global
+            "forecasting_strategy": "recursive",   # recursive | direct | deep_learning | foundation
+            "multiple_estimators": False,
+            "index_types_supported": ["pandas.RangeIndex", "pandas.DatetimeIndex"],
+            "requires_index_frequency": True,
+
+            "allowed_input_types_series": ["pandas.Series"],
+            "supports_exog": True,
+            "allowed_input_types_exog": ["pandas.Series", "pandas.DataFrame"],
+            "handles_missing_values_series": True, 
+            "handles_missing_values_exog": True, 
+
+            "supports_lags": True,
+            "supports_window_features": True,
+            "supports_transformer_series": False,
+            "supports_transformer_exog": True,
+            "supports_categorical_features": True,
+            "supports_weight_func": True,
+            "supports_differentiation": False,
+
+            "prediction_types": ["point", "probabilities"],
+            "supports_probabilistic": True,
+            "probabilistic_methods": ["class-probabilities"],
+            "handles_binned_residuals": False
+        }
+
+    def __repr__(
+        self
+    ) -> str:
+        """
+        Information displayed when a ForecasterRecursive object is printed.
+        """
+
+        (
+            params,
+            _,
+            _,
+            exog_names_in_,
+            _,
+        ) = self._preprocess_repr(
+                estimator      = self.estimator,
+                exog_names_in_ = self.exog_names_in_
+            )
+        
+        params = self._format_text_repr(params)
+        exog_names_in_ = self._format_text_repr(exog_names_in_)
+
+        info = (
+            f"{'=' * len(type(self).__name__)} \n"
+            f"{type(self).__name__} \n"
+            f"{'=' * len(type(self).__name__)} \n"
+            f"Estimator: {type(self.estimator).__name__} \n"
+            f"Lags: {self.lags} \n"
+            f"Window features: {self.window_features_names} \n"
+            f"Window size: {self.window_size} \n"
+            f"Series name: {self.series_name_in_} \n"
+            f"Classes: {self.classes_} \n"
+            f"Number of classes: {self.n_classes_} \n"
+            f"Exogenous included: {self.exog_in_} \n"
+            f"Exogenous names: {exog_names_in_} \n"
+            f"Feature encoding: {self.features_encoding} \n"
+            f"Categorical features: {self.categorical_features} \n"
+            f"Transformer for exog: {self.transformer_exog} \n"
+            f"Weight function included: {True if self.weight_func is not None else False} \n"
+            f"Drop NaN from series: {self.dropna_from_series} \n"
+            f"Training range: {self.training_range_.to_list() if self.is_fitted else None} \n"
+            f"Training index type: {str(self.index_type_).split('.')[-1][:-2] if self.is_fitted else None} \n"
+            f"Training index frequency: {self.index_freq_ if self.is_fitted else None} \n"
+            f"Estimator parameters: {params} \n"
+            f"fit_kwargs: {self.fit_kwargs} \n"
+            f"Creation date: {self.creation_date} \n"
+            f"Last fit date: {self.fit_date} \n"
+            f"Skforecast version: {self.skforecast_version} \n"
+            f"Python version: {self.python_version} \n"
+            f"Forecaster id: {self.forecaster_id} \n"
+        )
+
+        return info
+
+    def _repr_html_(self) -> str:
+        """
+        HTML representation of the object.
+        The "General Information" section is expanded by default.
+        """
+
+        (
+            params,
+            _,
+            _,
+            exog_names_in_,
+            _,
+        ) = self._preprocess_repr(
+                estimator                       = self.estimator,
+                exog_names_in_                  = self.exog_names_in_,
+                categorical_features_names_in_  = self.categorical_features_names_in_,
+                as_html                         = True,
+            )
+
+        style, unique_id = get_style_repr_html(self.is_fitted)
+
+        content = f"""
+        <div class="container-{unique_id}">
+            <p style="font-size: 1.5em; font-weight: bold; margin-block-start: 0.83em; margin-block-end: 0.83em;">{type(self).__name__}</p>
+            <details open>
+                <summary>General Information</summary>
+                <ul>
+                    <li><strong>Estimator:</strong> {type(self.estimator).__name__}</li>
+                    <li><strong>Lags:</strong> {self.lags}</li>
+                    <li><strong>Window features:</strong> {self.window_features_names}</li>
+                    <li><strong>Window size:</strong> {self.window_size}</li>
+                    <li><strong>Series name:</strong> {self.series_name_in_}</li>
+                    <li><strong>Exogenous included:</strong> {self.exog_in_}</li>
+                    <li><strong>Categorical features:</strong> {self.categorical_features}</li>
+                    <li><strong>Transformer for exog:</strong> {self.transformer_exog}</li>
+                    <li><strong>Weight function included:</strong> {self.weight_func is not None}</li>
+                    <li><strong>Drop NaN from series:</strong> {self.dropna_from_series}</li>
+                    <li><strong>Creation date:</strong> {self.creation_date}</li>
+                    <li><strong>Last fit date:</strong> {self.fit_date}</li>
+                    <li><strong>Skforecast version:</strong> {self.skforecast_version}</li>
+                    <li><strong>Python version:</strong> {self.python_version}</li>
+                    <li><strong>Forecaster id:</strong> {self.forecaster_id}</li>
+                </ul>
+            </details>
+            <details>
+                <summary>Classification Information</summary>
+                <ul>
+                    <li><strong>Classes:</strong> {self.classes_}</li>
+                    <li><strong>Class encoding:</strong> {self.encoding_mapping_}</li>
+                </ul>
+            </details>
+            <details>
+                <summary>Exogenous Variables</summary>
+                <p style="margin: 0.2em 0 0.2em 1.5em;">{exog_names_in_}</p>
+            </details>
+            <details>
+                <summary>Training Information</summary>
+                <ul>
+                    <li><strong>Training range:</strong> {self.training_range_.to_list() if self.is_fitted else 'Not fitted'}</li>
+                    <li><strong>Training index type:</strong> {str(self.index_type_).split('.')[-1][:-2] if self.is_fitted else 'Not fitted'}</li>
+                    <li><strong>Training index frequency:</strong> {self.index_freq_.freqstr if hasattr(self.index_freq_, 'freqstr') else str(self.index_freq_) if self.is_fitted else 'Not fitted'}</li>
+                </ul>
+            </details>
+            <details>
+                <summary>Estimator Parameters</summary>
+                <ul>
+                    {params}
+                </ul>
+            </details>
+            <details>
+                <summary>Fit Kwargs</summary>
+                <ul>
+                    {self.fit_kwargs}
+                </ul>
+            </details>
+            <p>
+                <a href="https://skforecast.org/{skforecast.__version__}/api/forecasterrecursiveclassifier.html">&#128214; <strong>API Reference</strong></a>
+                &nbsp;&nbsp;
+                <a href="https://skforecast.org/{skforecast.__version__}/user_guides/autoregressive-classification-forecasting.html">&#128221; <strong>User Guide</strong></a>
+            </p>
+        </div>
+        """
+
+        return style + content
+    
+    def _check_categorical_support(
+        self, 
+        estimator: object
+    ) -> bool:
+        """
+        Check if estimator supports native categorical features.
+        Checks by class name to avoid importing optional dependencies.
+        """
+
+        if isinstance(estimator, Pipeline):
+            estimator = estimator[-1]
+        if type(estimator).__name__ == 'CalibratedClassifierCV':
+            estimator = estimator.estimator         
+        
+        class_name = type(estimator).__name__
+        module_name = type(estimator).__module__
+        
+        supported_models = {
+            'LGBMClassifier': 'lightgbm',
+            'CatBoostClassifier': 'catboost',
+            'XGBClassifier': 'xgboost',
+            'HistGradientBoostingClassifier': 'sklearn.ensemble._hist_gradient_boosting'
+        }
+        
+        if class_name in supported_models:
+            expected_module = supported_models[class_name]
+            # NOTE: Verify if the estimator is from the expected module
+            # (in case someone creates a class with the same name)
+            if expected_module in module_name:
+                return True
+        
+        return False
+
+    def _create_lags(
+        self,
+        y: np.ndarray
+    ) -> tuple[np.ndarray | None, np.ndarray]:
+        """
+        Create the lagged values and their target variable from a time series.
+        
+        Note that the returned matrix `X_data` contains the lag 1 in the first 
+        column, the lag 2 in the second column and so on.
+        
+        Parameters
+        ----------
+        y : numpy ndarray
+            Training time series values.
+
+        Returns
+        -------
+        X_data : numpy ndarray, None
+            Lagged values (predictors).
+        y_data : numpy ndarray
+            Values of the time series related to each row of `X_data`.
+        
+        Notes
+        -----
+        Returned matrices may be views into the original `y` so care must be taken
+        when modifying them.
+
+        """
+        
+        X_data = None
+        if self.lags is not None:
+            y_strided = np.lib.stride_tricks.sliding_window_view(y, self.window_size)[:-1]
+            if self.lags_are_contiguous:
+                # Basic slice → view (no copy); reversed to put lag_1 first.
+                X_data = y_strided[:, self.window_size - self.max_lag:][:, ::-1]
+            else:
+                # Non-contiguous lags require fancy indexing, which forces a copy.
+                X_data = y_strided[:, self.window_size - self.lags]
+
+        y_data = y[self.window_size:]
+
+        return X_data, y_data
+
+    def _create_window_features(
+        self, 
+        y: pd.Series,
+        train_index: pd.Index,
+    ) -> tuple[list[np.ndarray], list[str]]:
+        """
+        Create window features from a time series.
+        
+        Parameters
+        ----------
+        y : pandas Series
+            Training time series.
+        train_index : pandas Index
+            Index of the training data.
+
+        Returns
+        -------
+        X_train_window_features : list
+            List of numpy ndarrays with the window features.
+        X_train_window_features_names_out_ : list
+            Names of the window features.
+        
+        """
+
+        len_train_index = len(train_index)
+        X_train_window_features = []
+        X_train_window_features_names_out_ = []
+        for wf in self.window_features:
+            X_train_wf = wf.transform_batch(y)
+            if not isinstance(X_train_wf, pd.DataFrame):
+                raise TypeError(
+                    f"The method `transform_batch` of {type(wf).__name__} "
+                    f"must return a pandas DataFrame."
+                )
+            X_train_wf = X_train_wf.iloc[-len_train_index:]
+            if not len(X_train_wf) == len_train_index:
+                raise ValueError(
+                    f"The method `transform_batch` of {type(wf).__name__} "
+                    f"must return a DataFrame with the same number of rows as "
+                    f"the input time series - `window_size`: {len_train_index}."
+                )
+            if not (X_train_wf.index == train_index).all():
+                raise ValueError(
+                    f"The method `transform_batch` of {type(wf).__name__} "
+                    f"must return a DataFrame with the same index as "
+                    f"the input time series - `window_size`."
+                )
+            
+            X_train_window_features_names_out_.extend(X_train_wf.columns)
+            X_train_wf = X_train_wf.to_numpy()     
+            X_train_window_features.append(X_train_wf)
+
+        return X_train_window_features, X_train_window_features_names_out_
+
+    def _create_train_X_y(
+        self,
+        y: pd.Series,
+        exog: pd.Series | pd.DataFrame | None = None,
+        store_last_window: bool = True
+    ) -> tuple[
+        np.ndarray, 
+        np.ndarray, 
+        pd.Index,
+        dict[str, Any],
+        list[str], 
+        list[str],
+        list[str], 
+        list[str], 
+        list[str], 
+        dict[str, type],
+        dict[str, type],
+        pd.DataFrame
+    ]:
+        """
+        Create training matrices from univariate time series and exogenous
+        variables.
+        
+        Parameters
+        ----------
+        y : pandas Series
+            Training time series.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s. Must have the same
+            number of observations as `y` and their indexes must be aligned.
+        store_last_window : bool, default True
+            Whether or not to store the last window (`last_window_`) of training data.
+
+        Returns
+        -------
+        X_train : numpy ndarray
+            Training values (predictors).
+        y_train : numpy ndarray
+            Values of the time series related to each row of `X_train`.
+        train_index : pandas Index
+            Index of the training data.
+        y_encoding_info_ : dict
+            Information related to the encoding of the target variable.
+        exog_names_in_ : list
+            Names of the exogenous variables used during training.
+        categorical_features_names_in_ : list
+            Names of the exogenous variables considered as categorical.
+        X_train_window_features_names_out_ : list
+            Names of the window features included in the matrix `X_train` created
+            internally for training.
+        X_train_exog_names_out_ : list
+            Names of the exogenous variables included in the matrix `X_train` created
+            internally for training. It can be different from `exog_names_in_` if
+            some exogenous variables are transformed during the training process.
+        X_train_features_names_out_ : list
+            Names of the columns of the matrix created internally for training.
+        exog_dtypes_in_ : dict
+            Type of each exogenous variable/s used in training before the transformation
+            applied by `transformer_exog`. If `transformer_exog` is not used, it
+            is equal to `exog_dtypes_out_`.
+        exog_dtypes_out_ : dict
+            Type of each exogenous variable/s used in training after the transformation
+            applied by `transformer_exog`. If `transformer_exog` is not used, it 
+            is equal to `exog_dtypes_in_`.
+        last_window_ : pandas DataFrame
+            This window represents the most recent data observed by the predictor
+            during its training phase. It contains the values needed to predict the
+            next step immediately after the training data. These values are stored
+            in the original scale of the time series before undergoing any transformation.
+
+        Notes
+        -----
+        If `y` or `exog` contain interspersed NaN values, rows where `y_train`
+        is NaN are always removed. Rows where `X_train` contains NaN (from
+        lagged NaN in `y` or from NaN in `exog`) are removed only if
+        `dropna_from_series=True`; otherwise a warning is issued.
+
+        """
+
+        check_y(y=y, allow_nan=True)
+        y = input_to_frame(data=y, input_name='y')
+
+        if len(y) <= self.window_size:
+            raise ValueError(
+                f"Length of `y` must be greater than the maximum window size "
+                f"needed by the forecaster.\n"
+                f"    Length `y`: {len(y)}.\n"
+                f"    Max window size: {self.window_size}.\n"
+                f"    Lags window size: {self.max_lag}.\n"
+                f"    Window features window size: {self.max_size_window_features}."
+            )
+        
+        y_values, y_index = check_extract_values_and_index(data=y, data_label='`y`')
+
+        nan_mask = pd.isna(y_values)
+        y_values_clean = y_values[~nan_mask] if nan_mask.any() else y_values
+        if len(y_values_clean) == 0:
+            raise ValueError(
+                "All values in `y` are NaN. A valid time series with at "
+                "least some non-NaN values is required for training."
+            )
+
+        if np.issubdtype(y_values.dtype, np.floating):
+            not_allowed = np.mod(y_values_clean, 1) != 0
+            if np.any(not_allowed):
+                examples = ", ".join(map(str, np.unique(y_values_clean[not_allowed])[:5]))
+                raise ValueError(
+                    f"Invalid target for classification: targets must be discrete "
+                    f"class labels (strings, integers or floats with decimals "
+                    f"equal to 0). Received float dtype '{y_values.dtype}' with "
+                    f"decimals (e.g., {examples}). "
+                )
+
+        # NOTE: See Notes sections for explanation
+        fit_transformer = False if self.is_fitted else True
+        if fit_transformer:
+            encoding_mapping_ = {}
+            y_encoded_clean = self.encoder.fit_transform(
+                y_values_clean.reshape(-1, 1)
+            ).ravel()
+            for i, cat in enumerate(self.encoder.categories_[0]):
+                encoding_mapping_[cat] = i
+        else:
+            encoding_mapping_ = self.encoding_mapping_
+            y_encoded_clean = self.encoder.transform(
+                y_values_clean.reshape(-1, 1)
+            ).ravel()
+
+        if nan_mask.any():
+            y_encoded = np.full(len(y_values), np.nan)
+            y_encoded[~nan_mask] = y_encoded_clean
+        else:
+            y_encoded = y_encoded_clean
+
+        classes = list(encoding_mapping_.keys())
+        class_codes = list(encoding_mapping_.values())
+        n_classes = len(classes)
+        if n_classes < 2:
+            raise ValueError(
+                f"The target variable must have at least 2 classes. "
+                f"Found {classes} class."
+            )
+        
+        y_encoding_info_ = {
+            'classes_': classes,
+            'class_codes_': class_codes,
+            'n_classes_': n_classes,
+            'encoding_mapping_': encoding_mapping_
+        }
+        train_index = y_index[self.window_size:]
+
+        exog_names_in_ = None
+        exog_dtypes_in_ = None
+        exog_dtypes_out_ = None
+        X_train_exog_names_out_ = None
+        categorical_features_names_in_ = None
+        if exog is not None:
+            check_exog(exog=exog, allow_nan=True)
+            exog = input_to_frame(data=exog, input_name='exog')
+            _, exog_index = check_extract_values_and_index(
+                data=exog, data_label='`exog`', ignore_freq=True, return_values=False
+            )
+
+            len_y = len(y_values)
+            len_train_index = len(train_index)
+            len_exog = len(exog)
+            if not len_exog == len_y and not len_exog == len_train_index:
+                raise ValueError(
+                    f"Length of `exog` must be equal to the length of `y` (if index is "
+                    f"fully aligned) or length of `y` - `window_size` (if `exog` "
+                    f"starts after the first `window_size` values).\n"
+                    f"    `exog`              : ({exog_index[0]} -- {exog_index[-1]})  (n={len_exog})\n"
+                    f"    `y`                 : ({y.index[0]} -- {y.index[-1]})  (n={len_y})\n"
+                    f"    `y` - `window_size` : ({train_index[0]} -- {train_index[-1]})  (n={len_train_index})"
+                )
+
+            exog_names_in_ = exog.columns.to_list()
+            exog_dtypes_in_ = get_exog_dtypes(exog=exog)
+
+            exog = transform_dataframe(
+                       df                = exog,
+                       transformer       = self.transformer_exog,
+                       fit               = fit_transformer,
+                       inverse_transform = False
+                   )
+
+            if self.categorical_features is not None:
+                if self.categorical_features == 'auto':
+                    categorical_features_names_in_ = [
+                        col for col, dtype in exog.dtypes.items()
+                        if not pd.api.types.is_numeric_dtype(dtype)
+                        and not pd.api.types.is_bool_dtype(dtype)
+                    ]
+                else:
+                    missing_cols = set(self.categorical_features) - set(exog.columns)
+                    if missing_cols:
+                        raise ValueError(
+                            f"The following columns specified in `categorical_features` "
+                            f"are not present in `exog` after `transformer_exog`: "
+                            f"{missing_cols}."
+                        )
+                    categorical_features_names_in_ = list(self.categorical_features)
+                
+                if categorical_features_names_in_: 
+                    if self.transformer_exog is None:
+                        exog = exog.copy()
+                    if fit_transformer:
+                        exog[categorical_features_names_in_] = (
+                            self.categorical_encoder.fit_transform(
+                                exog[categorical_features_names_in_]
+                            )
+                        )
+                    else:
+                        exog[categorical_features_names_in_] = (
+                            self.categorical_encoder.transform(
+                                exog[categorical_features_names_in_]
+                            )
+                        )
+
+            check_exog(exog=exog, allow_nan=False)
+            if self.categorical_features is None:
+                check_exog_dtypes(exog, call_check_exog=False)
+            
+            X_train_exog_names_out_ = exog.columns.to_list()
+            exog_dtypes_out_ = get_exog_dtypes(exog=exog)
+
+            exog = exog.to_numpy()
+
+            if len_exog == len_y:
+                if not (exog_index == y_index).all():
+                    raise ValueError(
+                        "When `exog` has the same length as `y`, the index of "
+                        "`exog` must be aligned with the index of `y` "
+                        "to ensure the correct alignment of values."
+                    )
+                # The first `self.window_size` positions have to be removed from 
+                # exog since they are not in X_train.
+                exog = exog[self.window_size:, ]
+            else:
+                if not (exog_index == train_index).all():
+                    raise ValueError(
+                        "When `exog` doesn't contain the first `window_size` observations, "
+                        "the index of `exog` must be aligned with the index of `y` minus "
+                        "the first `window_size` observations to ensure the correct "
+                        "alignment of values."
+                    )
+
+        X_train = []
+        X_train_features_names_out_ = []
+
+        X_train_lags, y_train = self._create_lags(y=y_encoded)
+        if X_train_lags is not None:
+            X_train.append(X_train_lags)
+            X_train_features_names_out_.extend(self.lags_names)
+        
+        X_train_window_features_names_out_ = None
+        if self.window_features is not None:
+            y_window_features = pd.Series(y_encoded, index=y_index)
+            X_train_window_features, X_train_window_features_names_out_ = (
+                self._create_window_features(
+                    y=y_window_features, train_index=train_index
+                )
+            )
+            X_train.extend(X_train_window_features)
+            X_train_features_names_out_.extend(X_train_window_features_names_out_)
+
+        if exog is not None:
+            X_train.append(exog)
+            X_train_features_names_out_.extend(X_train_exog_names_out_)
+        
+        if len(X_train) == 1:
+            X_train = X_train[0]
+        else:
+            X_train = np.concatenate(X_train, axis=1)
+
+        # --- NaN row filtering (interspersed NaN support) ---
+        if np.isnan(y_train).any():
+            mask = ~np.isnan(y_train)
+            y_train = y_train[mask]
+            X_train = X_train[mask]
+            train_index = train_index[mask]
+            warnings.warn(
+                "NaNs detected in `y_train`. They have been dropped because the "
+                "target variable cannot have NaN values. Same rows have been "
+                "dropped from `X_train` to maintain alignment. This is caused by "
+                "interspersed NaNs in `y`.",
+                MissingValuesWarning
+            )
+
+        if self.dropna_from_series:
+            nan_rows = pd.isna(X_train).any(axis=1)
+            if nan_rows.any():
+                mask = ~nan_rows
+                X_train = X_train[mask]
+                y_train = y_train[mask]
+                train_index = train_index[mask]
+                warnings.warn(
+                    "NaNs detected in `X_train`. They have been dropped. If "
+                    "you want to keep them, set `forecaster.dropna_from_series = False`. "
+                    "Same rows have been removed from `y_train` to maintain alignment. "
+                    "This is caused by interspersed NaNs in `y` or `exog`.",
+                    MissingValuesWarning
+                )
+        else:
+            if pd.isna(X_train).any():
+                warnings.warn(
+                    "NaNs detected in `X_train`. Some estimators do not allow "
+                    "NaN values during training. If you want to drop them, "
+                    "set `forecaster.dropna_from_series = True`.",
+                    MissingValuesWarning
+                )
+
+        if len(y_train) == 0:
+            raise ValueError(
+                "All samples have been removed due to NaNs. Set "
+                "`forecaster.dropna_from_series = False` or review `y` and "
+                "`exog` values."
+            )
+
+        last_window_ = None
+        if store_last_window:
+            last_window_ = pd.DataFrame(
+                               data    = y_values[-self.window_size:],
+                               index   = y_index[-self.window_size:],
+                               columns = y.columns   
+                           )
+
+        return (
+            X_train,
+            y_train,
+            train_index,
+            y_encoding_info_,
+            exog_names_in_,
+            categorical_features_names_in_,
+            X_train_window_features_names_out_,
+            X_train_exog_names_out_,
+            X_train_features_names_out_,
+            exog_dtypes_in_,
+            exog_dtypes_out_,
+            last_window_
+        )
+    
+    def create_train_X_y(
+        self,
+        y: pd.Series,
+        exog: pd.Series | pd.DataFrame | None = None,
+        encoded: bool = True
+    ) -> tuple[pd.DataFrame, pd.Series]:
+        """
+        Create training matrices from univariate time series and exogenous
+        variables.
+        
+        Parameters
+        ----------
+        y : pandas Series
+            Training time series.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s. Must have the same
+            number of observations as `y` and their indexes must be aligned.
+        encoded : bool, default True
+            Whether to return the target (`y_train`) and lag features encoded
+            as integers (as used during training) or decoded to their original
+            categories. This only affects features derived from `y` (lags and
+            `y_train`); exogenous variables encoded via `categorical_features`
+            are always returned in their encoded form.
+
+        Returns
+        -------
+        X_train : pandas DataFrame
+            Training values (predictors).
+        y_train : pandas Series
+            Values of the time series related to each row of `X_train`.
+
+        Notes
+        -----
+        **Autoregressive Features (`features_encoding`)**
+        During training, target class labels are ordinal-encoded as integers
+        using `encoder` (`OrdinalEncoder`). When `features_encoding` is `'auto'` 
+        or `'categorical'`, lag features and window features returning class
+        codes (e.g., mode) are communicated as categorical to the estimator's
+        native categorical handling (e.g., LightGBM, CatBoost). When set to
+        `'ordinal'`, they are treated as numeric values.
+        Related attributes: `encoder` (`OrdinalEncoder`), `encoding_mapping_`, 
+        `code_to_class_mapping_`, `classes_`, `class_codes_`, `n_classes_`.
+
+        **Exogenous Features (`categorical_features`)**
+        Exogenous variables specified via `categorical_features` are ordinal-
+        encoded using `categorical_encoder` (`OrdinalEncoder`) and their column 
+        indices are combined with the autoregressive categorical indices when 
+        configuring the estimator's native categorical handling. The forecaster 
+        always overwrites the estimator's categorical configuration to include 
+        both autoregressive and exogenous categorical indices.
+        Related attributes: `categorical_encoder` (`OrdinalEncoder`), 
+        `categorical_features_names_in_`.
+
+        **Handling Missing Values**
+        If `y` or `exog` contain interspersed NaN values, rows where `y_train`
+        is NaN are always removed. Rows where `X_train` contains NaN (from
+        lagged NaN in `y` or from NaN in `exog`) are removed only if
+        `dropna_from_series=True`; otherwise a warning is issued.
+        
+        """
+
+        (
+            X_train,
+            y_train,
+            train_index,
+            _,
+            _,
+            _,
+            _,
+            _,
+            X_train_features_names_out_,
+            _,
+            exog_dtypes_out_,
+            _
+        ) = self._create_train_X_y(y=y, exog=exog)
+
+        X_train = pd.DataFrame(
+                      data    = X_train,
+                      index   = train_index,
+                      columns = X_train_features_names_out_
+                  )
+
+        if exog_dtypes_out_ is not None:
+            X_train_dtypes = {col: float for col in X_train_features_names_out_}
+            X_train_dtypes.update(exog_dtypes_out_)
+            X_train = X_train.astype(X_train_dtypes, copy=False)
+
+        y_train = pd.Series(
+                      data  = y_train,
+                      index = train_index,
+                      name  = 'y'
+                  )
+
+        if not encoded:
+            
+            for col in self.lags_names:
+                X_train[col] = self.encoder.inverse_transform(
+                    X_train[col].to_numpy().reshape(-1, 1)
+                ).ravel()
+
+            y_train = pd.Series(
+                          data  = self.encoder.inverse_transform(y_train.to_numpy().reshape(-1, 1)).ravel(),
+                          index = y_train.index,
+                          name  = y_train.name
+                      )
+
+        return X_train, y_train
+
+    def _train_test_split_one_step_ahead(
+        self,
+        y: pd.Series,
+        initial_train_size: int,
+        exog: pd.Series | pd.DataFrame | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, dict[str, object]]:
+        """
+        Create matrices needed to train and test the forecaster for one-step-ahead
+        predictions. Uses `_create_train_X_y` to work directly with numpy arrays
+        and precomputes sample weights and fit kwargs (including categorical
+        feature configuration) so they are computed once rather than per trial.
+
+        Parameters
+        ----------
+        y : pandas Series
+            Training time series.
+        initial_train_size : int
+            Initial size of the training set. It is the number of observations used
+            to train the forecaster before making the first prediction.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s. Must have the same
+            number of observations as `y` and their indexes must be aligned.
+        
+        Returns
+        -------
+        X_train : numpy ndarray
+            Predictor values used to train the model.
+        y_train : numpy ndarray
+            Target values related to each row of `X_train`.
+        X_test : numpy ndarray
+            Predictor values used to test the model.
+        y_test : numpy ndarray
+            Target values related to each row of `X_test`.
+        sample_weight : numpy ndarray, None
+            Precomputed sample weights for training. `None` if no `weight_func`.
+        fit_kwargs : dict
+            Precomputed keyword arguments for `estimator.fit`, including
+            categorical feature configuration.
+        
+        """
+
+        is_fitted = self.is_fitted
+        encoding_mapping_ = self.encoding_mapping_
+
+        self.is_fitted = False
+        
+        (
+            X_train,
+            y_train,
+            train_index,
+            y_encoding_info_,
+            _,
+            categorical_features_names_in_,
+            X_train_window_features_names_out_,
+            _,
+            X_train_features_names_out_,
+            _,
+            _,
+            _
+        ) = self._create_train_X_y(
+                y    = y.iloc[: initial_train_size],
+                exog = exog.iloc[: initial_train_size] if exog is not None else None,
+                store_last_window = False
+            )
+
+        test_init = initial_train_size - self.window_size
+        self.is_fitted = True
+        self.encoding_mapping_ = y_encoding_info_['encoding_mapping_']
+
+        (
+            X_test,
+            y_test,
+            _,
+            *_
+        ) = self._create_train_X_y(
+                y    = y.iloc[test_init:],
+                exog = exog.iloc[test_init:] if exog is not None else None,
+                store_last_window = False
+            )
+
+        self.is_fitted = is_fitted
+        self.encoding_mapping_ = encoding_mapping_
+
+        sample_weight = self.create_sample_weights(X_train=train_index)
+
+        all_categorical_names = []
+        if self.use_native_categoricals and self.lags is not None:
+            all_categorical_names.extend(self.lags_names)
+        if self.use_native_categoricals and X_train_window_features_names_out_:
+            all_categorical_names.extend(
+                [name for name in X_train_window_features_names_out_
+                 if 'mode' in name]
+            )
+        if categorical_features_names_in_:
+            all_categorical_names.extend(categorical_features_names_in_)
+
+        if self.categorical_features is not None or self.use_native_categoricals:
+            fit_kwargs = configure_estimator_categorical_features(
+                             estimator                      = self.estimator,
+                             categorical_features_names_in_ = all_categorical_names,
+                             X_train_features_names_out_    = X_train_features_names_out_,
+                             fit_kwargs                     = {**self.fit_kwargs}
+                         )
+        else:
+            fit_kwargs = {**self.fit_kwargs}
+
+        X_train = cast_catboost_categorical_columns(
+            X=X_train, fit_kwargs=fit_kwargs, estimator=self.estimator
+        )
+        X_test = cast_catboost_categorical_columns(
+            X=X_test, fit_kwargs=fit_kwargs, estimator=self.estimator
+        )
+
+        return X_train, y_train, X_test, y_test, sample_weight, fit_kwargs
+
+    def create_sample_weights(
+        self,
+        X_train: pd.DataFrame | pd.Index,
+    ) -> np.ndarray:
+        """
+        Create weights for each observation according to the forecaster's attribute
+        `weight_func`.
+
+        Parameters
+        ----------
+        X_train : pandas DataFrame, pandas Index
+            Dataframe created with the `create_train_X_y` method, first return, 
+            or the index of the DataFrame.
+
+        Returns
+        -------
+        sample_weight : numpy ndarray
+            Weights to use in `fit` method.
+
+        """
+
+        sample_weight = None
+
+        if self.weight_func is not None:
+            sample_weight = self.weight_func(
+                X_train.index if isinstance(X_train, pd.DataFrame) else X_train
+            )
+
+        if sample_weight is not None:
+            if np.isnan(sample_weight).any():
+                raise ValueError(
+                    "The resulting `sample_weight` cannot have NaN values."
+                )
+            if np.any(sample_weight < 0):
+                raise ValueError(
+                    "The resulting `sample_weight` cannot have negative values."
+                )
+            if np.sum(sample_weight) == 0:
+                raise ValueError(
+                    "The resulting `sample_weight` cannot be normalized because "
+                    "the sum of the weights is zero."
+                )
+
+        return sample_weight
+
+    @manage_warnings
+    def fit(
+        self,
+        y: pd.Series,
+        exog: pd.Series | pd.DataFrame | None = None,
+        store_last_window: bool = True,
+        store_in_sample_residuals: Any = None,
+        suppress_warnings: bool = False
+    ) -> None:
+        """
+        Training Forecaster.
+
+        Additional arguments to be passed to the `fit` method of the estimator 
+        can be added with the `fit_kwargs` argument when initializing the forecaster.
+        
+        Parameters
+        ----------
+        y : pandas Series
+            Training time series.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s. Must have the same
+            number of observations as `y` and their indexes must be aligned so
+            that y[i] is regressed on exog[i].
+        store_last_window : bool, default True
+            Whether or not to store the last window (`last_window_`) of training data.
+        store_in_sample_residuals : Ignored
+            Not used, present here for API consistency by convention.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings are suppressed during execution.
+            See `skforecast.exceptions.warn_skforecast_categories` for the
+            list of warnings that are suppressed.
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        **Autoregressive Features (`features_encoding`)**
+        During training, target class labels are ordinal-encoded as integers
+        using `encoder` (`OrdinalEncoder`). When `features_encoding` is `'auto'` 
+        or `'categorical'`, lag features and window features returning class
+        codes (e.g., mode) are communicated as categorical to the estimator's
+        native categorical handling (e.g., LightGBM, CatBoost). When set to
+        `'ordinal'`, they are treated as numeric values.
+        Related attributes: `encoder` (`OrdinalEncoder`), `encoding_mapping_`, 
+        `code_to_class_mapping_`, `classes_`, `class_codes_`, `n_classes_`.
+
+        **Exogenous Features (`categorical_features`)**
+        Exogenous variables specified via `categorical_features` are ordinal-
+        encoded using `categorical_encoder` (`OrdinalEncoder`) and their column 
+        indices are combined with the autoregressive categorical indices when 
+        configuring the estimator's native categorical handling. The forecaster 
+        always overwrites the estimator's categorical configuration to include 
+        both autoregressive and exogenous categorical indices.
+        Related attributes: `categorical_encoder` (`OrdinalEncoder`), 
+        `categorical_features_names_in_`.
+        
+        """
+
+        self.last_window_                       = None
+        self.index_type_                        = None
+        self.index_freq_                        = None
+        self.training_range_                    = None
+        self.series_name_in_                    = None
+        self.exog_in_                           = False
+        self.exog_names_in_                     = None
+        self.exog_type_in_                      = None
+        self.exog_dtypes_in_                    = None
+        self.exog_dtypes_out_                   = None
+        self.categorical_features_names_in_     = None
+        self.X_train_window_features_names_out_ = None
+        self.X_train_exog_names_out_            = None
+        self.X_train_features_names_out_        = None
+        self.is_fitted                          = False
+        self.fit_date                           = None
+        self.classes_                           = None
+        self.class_codes_                       = None
+        self.n_classes_                         = None
+        self.encoding_mapping_                  = None
+        self.code_to_class_mapping_             = None
+
+        (
+            X_train,
+            y_train,
+            train_index,
+            y_encoding_info_,
+            exog_names_in_,
+            categorical_features_names_in_,
+            X_train_window_features_names_out_,
+            X_train_exog_names_out_,
+            X_train_features_names_out_,
+            exog_dtypes_in_,
+            exog_dtypes_out_,
+            last_window_
+        ) = self._create_train_X_y(
+                y=y, exog=exog, store_last_window=store_last_window
+            )
+        
+        sample_weight = self.create_sample_weights(X_train=train_index)
+
+        all_categorical_names = []
+        if self.use_native_categoricals and self.lags is not None:
+            all_categorical_names.extend(self.lags_names)
+        if self.use_native_categoricals and X_train_window_features_names_out_:
+            # NOTE: Window features whose name contains 'mode' are treated as
+            # categorical (they return class codes).
+            all_categorical_names.extend(
+                [name for name in X_train_window_features_names_out_
+                 if 'mode' in name]
+            )
+        if categorical_features_names_in_:
+            all_categorical_names.extend(categorical_features_names_in_)
+
+        if self.categorical_features is not None or self.use_native_categoricals:
+            fit_kwargs = configure_estimator_categorical_features(
+                             estimator                      = self.estimator,
+                             categorical_features_names_in_ = all_categorical_names,
+                             X_train_features_names_out_    = X_train_features_names_out_,
+                             fit_kwargs                     = {**self.fit_kwargs}
+                         )
+        else:
+            fit_kwargs = {**self.fit_kwargs}
+
+        X_train = cast_catboost_categorical_columns(
+            X=X_train, fit_kwargs=fit_kwargs, estimator=self.estimator
+        )
+
+        if sample_weight is not None:
+            self.estimator.fit(
+                X             = X_train,
+                y             = y_train,
+                sample_weight = sample_weight,
+                **fit_kwargs
+            )
+        else:
+            self.estimator.fit(X=X_train, y=y_train, **fit_kwargs)
+
+        self.classes_ = y_encoding_info_['classes_']
+        self.class_codes_ = y_encoding_info_['class_codes_']
+        self.n_classes_ = y_encoding_info_['n_classes_']
+        self.encoding_mapping_ = y_encoding_info_['encoding_mapping_']
+        self.code_to_class_mapping_ = {
+            code: cls for cls, code in self.encoding_mapping_.items()
+        }
+
+        self.X_train_window_features_names_out_ = X_train_window_features_names_out_
+        self.X_train_features_names_out_ = X_train_features_names_out_
+
+        self.is_fitted = True
+        self.series_name_in_ = y.name if y.name is not None else 'y'
+        self.fit_date = pd.Timestamp.today().strftime('%Y-%m-%d %H:%M:%S')
+        self.training_range_ = y.index[[0, -1]]
+        self.index_type_ = type(y.index)
+        if isinstance(y.index, pd.DatetimeIndex):
+            self.index_freq_ = y.index.freq
+        else: 
+            self.index_freq_ = y.index.step
+
+        if exog is not None:
+            self.exog_in_ = True
+            self.exog_type_in_ = type(exog)
+            self.exog_names_in_ = exog_names_in_
+            self.exog_dtypes_in_ = exog_dtypes_in_
+            self.exog_dtypes_out_ = exog_dtypes_out_
+            self.categorical_features_names_in_ = categorical_features_names_in_
+            self.X_train_exog_names_out_ = X_train_exog_names_out_
+
+        if store_last_window:
+            self.last_window_ = last_window_
+        
+    def _create_predict_inputs(
+        self,
+        steps: int | str | pd.Timestamp, 
+        last_window: pd.Series | pd.DataFrame | None = None,
+        exog: pd.Series | pd.DataFrame | None = None,
+        check_inputs: bool = True
+    ) -> tuple[np.ndarray, np.ndarray | None, pd.Index, int]:
+        """
+        Create the inputs needed for the first iteration of the prediction 
+        process. As this is a recursive process, the last window is updated at 
+        each iteration of the prediction process.
+        
+        Parameters
+        ----------
+        steps : int, str, pandas Timestamp
+            Number of steps to predict. 
+            
+            - If steps is int, number of steps to predict. 
+            - If str or pandas Datetime, the prediction will be up to that date.
+        last_window : pandas Series, pandas DataFrame, default None
+            Series values used to create the predictors (lags) needed in the 
+            first iteration of the prediction (t + 1).
+            If `last_window = None`, the values stored in `self.last_window_` are
+            used to calculate the initial predictors, and the predictions start
+            right after training data.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s.
+        check_inputs : bool, default True
+            If `True`, the input is checked for possible warnings and errors 
+            with the `check_predict_input` function. This argument is created 
+            for internal use and is not recommended to be changed.
+
+        Returns
+        -------
+        last_window_values : numpy ndarray
+            Series values used to create the predictors needed in the first 
+            iteration of the prediction (t + 1).
+        exog_values : numpy ndarray, None
+            Exogenous variable/s included as predictor/s.
+        prediction_index : pandas Index
+            Index of the predictions.
+        steps: int
+            Number of future steps predicted.
+        
+        """
+
+        if last_window is None:
+            last_window = self.last_window_
+
+        if self.is_fitted:
+            steps = date_to_index_position(
+                        index        = last_window.index,
+                        date_input   = steps,
+                        method       = 'prediction',
+                        date_literal = 'steps'
+                    )
+
+        if check_inputs:
+            check_predict_input(
+                forecaster_name = type(self).__name__,
+                steps           = steps,
+                is_fitted       = self.is_fitted,
+                exog_in_        = self.exog_in_,
+                index_type_     = self.index_type_,
+                index_freq_     = self.index_freq_,
+                window_size     = self.window_size,
+                last_window     = last_window,
+                exog            = exog,
+                exog_names_in_  = self.exog_names_in_
+            )
+
+        # NOTE: NaNs are checked in check_predict_input, it creates a warning if found.
+        last_window_values = (
+            last_window.iloc[-self.window_size:].to_numpy(copy=True).ravel()
+        )
+
+        valid_classes = set(self.encoding_mapping_.keys())
+        unique_values = set(last_window_values)
+        # NaN values are not class labels; exclude them from validation
+        unique_values = {v for v in unique_values if not pd.isna(v)}
+        invalid_values = unique_values - valid_classes
+
+        if invalid_values:
+            invalid_list = sorted(list(invalid_values))[:5]
+            valid_list = sorted(list(valid_classes))[:10]
+            
+            raise ValueError(
+                f"The `last_window` contains {len(invalid_values)} class label(s) "
+                f"not seen during training: {invalid_list}{'...' if len(invalid_values) > 5 else ''}.\n"
+                f"Valid class labels (seen during training): {valid_list}"
+                f"{'...' if len(valid_classes) > 10 else ''}.\n"
+                f"Total valid classes: {len(valid_classes)}."
+            )
+
+        # NOTE: Transform class labels to encoded values (same encoding used in 
+        # training). This ensures that lag features will have the same numerical 
+        # representation as during training.
+        nan_mask_lw = pd.isna(last_window_values)
+        if nan_mask_lw.any():
+            lw_clean = last_window_values[~nan_mask_lw]
+            lw_encoded_clean = self.encoder.transform(
+                lw_clean.reshape(-1, 1)
+            ).ravel()
+            last_window_values = np.full(len(last_window_values), np.nan)
+            last_window_values[~nan_mask_lw] = lw_encoded_clean
+        else:
+            last_window_values = self.encoder.transform(
+                last_window_values.reshape(-1, 1)
+            ).ravel()
+
+        if exog is not None:
+
+            exog = input_to_frame(data=exog, input_name='exog')
+            if exog.columns.tolist() != self.exog_names_in_:
+                exog = exog[self.exog_names_in_]
+
+            exog = transform_dataframe(
+                       df                = exog,
+                       transformer       = self.transformer_exog,
+                       fit               = False,
+                       inverse_transform = False
+                   )
+
+            if self.categorical_features is not None and self.categorical_features_names_in_:
+                if self.transformer_exog is None:
+                    exog = exog.copy()
+                exog[self.categorical_features_names_in_] = (
+                    self.categorical_encoder.transform(
+                        exog[self.categorical_features_names_in_]
+                    )
+                )
+            
+            # NOTE: Only check dtypes if they are not the same as seen in training
+            if not exog.dtypes.to_dict() == self.exog_dtypes_out_:
+                check_exog_dtypes(exog=exog)
+            else:
+                check_exog(exog=exog, allow_nan=False)
+            
+            exog_values = exog.to_numpy()[:steps]
+        else:
+            exog_values = None
+
+        prediction_index = expand_index(
+                               index = last_window.index,
+                               steps = steps,
+                           )
+
+        return last_window_values, exog_values, prediction_index, steps
+
+    def _recursive_predict(
+        self,
+        steps: int,
+        last_window_values: np.ndarray,
+        exog_values: np.ndarray | None = None,
+        predict_proba: bool = False
+    ) -> np.ndarray:
+        """
+        Predict n steps ahead. It is an iterative process in which, each prediction,
+        is used as a predictor for the next step.
+        
+        Parameters
+        ----------
+        steps : int
+            Number of steps to predict. 
+        last_window_values : numpy ndarray
+            Series values used to create the predictors needed in the first 
+            iteration of the prediction (t + 1).
+        exog_values : numpy ndarray, default None
+            Exogenous variable/s included as predictor/s.
+        predict_proba : bool, default False
+            Whether to predict class probabilities instead of class labels.
+        
+        Returns
+        -------
+        predictions : numpy ndarray
+            Predicted values if `predict_proba=False`, probability matrix of 
+            shape (steps, n_classes) with the predicted probabilities for each class 
+            at each step if `predict_proba=True`.
+
+        """
+
+        original_device = set_cpu_gpu_device(estimator=self.estimator, device='cpu')
+
+        n_lags = len(self.lags) if self.lags is not None else 0
+        n_window_features = (
+            len(self.X_train_window_features_names_out_)
+            if self.window_features is not None
+            else 0
+        )
+        n_exog = exog_values.shape[1] if exog_values is not None else 0
+
+        X = np.full(
+            shape=(n_lags + n_window_features + n_exog), fill_value=np.nan, dtype=float
+        )
+        predictions = np.full(shape=steps, fill_value=np.nan, dtype=float)
+        last_window = np.concatenate((last_window_values, predictions))
+
+        if predict_proba:
+            predictions = np.full(
+                shape=(steps, self.n_classes_), fill_value=np.nan, dtype=float
+            )
+
+        has_lags = self.lags is not None
+        has_window_features = self.window_features is not None
+        has_exog = exog_values is not None
+
+        for i in range(steps):
+
+            remaining = steps - i
+
+            if has_lags:
+                if self.lags_are_contiguous:
+                    X[:n_lags] = last_window[-(remaining + n_lags): -remaining][::-1]
+                else:
+                    X[:n_lags] = last_window[-self.lags - remaining]
+            
+            if has_window_features:
+                window_data = last_window[i : -remaining]
+                X[n_lags : n_lags + n_window_features] = np.concatenate(
+                    [
+                        wf.transform(window_data)
+                        for wf in self.window_features
+                    ]
+                )
+            if has_exog:
+                X[n_lags + n_window_features:] = exog_values[i]
+
+            if predict_proba:
+                proba = self.estimator.predict_proba(X.reshape(1, -1)).ravel()
+                predictions[i, :] = proba
+                pred = self.class_codes_[np.argmax(proba)]
+            else:
+                pred = self.estimator.predict(X.reshape(1, -1)).ravel().item()
+                predictions[i] = pred
+
+            # Update `last_window` values. The first position is discarded and 
+            # the new prediction is added at the end.
+            last_window[-remaining] = pred
+
+        set_cpu_gpu_device(estimator=self.estimator, device=original_device)
+
+        return predictions
+
+    @manage_warnings
+    def create_predict_X(
+        self,
+        steps: int,
+        last_window: pd.Series | pd.DataFrame | None = None,
+        exog: pd.Series | pd.DataFrame | None = None,
+        check_inputs: bool = True,
+        suppress_warnings: bool = False
+    ) -> pd.DataFrame:
+        """
+        Create the predictors needed to predict `steps` ahead. As it is a recursive
+        process, the predictors are created at each iteration of the prediction 
+        process.
+        
+        Parameters
+        ----------
+        steps : int, str, pandas Timestamp
+            Number of steps to predict. 
+            
+            - If steps is int, number of steps to predict. 
+            - If str or pandas Datetime, the prediction will be up to that date.
+        last_window : pandas Series, pandas DataFrame, default None
+            Series values used to create the predictors (lags) needed in the 
+            first iteration of the prediction (t + 1).
+            If `last_window = None`, the values stored in `self.last_window_` are
+            used to calculate the initial predictors, and the predictions start
+            right after training data.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s.
+        check_inputs : bool, default True
+            If `True`, the input is checked for possible warnings and errors 
+            with the `check_predict_input` function. This argument is created 
+            for internal use and is not recommended to be changed.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings are suppressed during execution.
+            See `skforecast.exceptions.warn_skforecast_categories` for the
+            list of warnings that are suppressed.
+
+        Returns
+        -------
+        X_predict : pandas DataFrame
+            Pandas DataFrame with the predictors for each step. The index 
+            is the same as the prediction index.
+        
+        """
+
+        (
+            last_window_values,
+            exog_values,
+            prediction_index,
+            steps
+        ) = self._create_predict_inputs(
+                steps        = steps,
+                last_window  = last_window,
+                exog         = exog,
+                check_inputs = check_inputs,
+            )
+        
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", 
+                message="X does not have valid feature names", 
+                category=UserWarning
+            )
+            predictions = self._recursive_predict(
+                              steps              = steps,
+                              last_window_values = last_window_values,
+                              exog_values        = exog_values,
+                              predict_proba      = False
+                          )
+
+        X_predict = []
+        full_predictors = np.concatenate((last_window_values, predictions))
+
+        if self.lags is not None:
+            idx = np.arange(-steps, 0)[:, None] - self.lags
+            X_lags = full_predictors[idx + len(full_predictors)]
+            X_predict.append(X_lags)
+
+        if self.window_features is not None:
+            X_window_features = np.full(
+                shape      = (steps, len(self.X_train_window_features_names_out_)), 
+                fill_value = np.nan, 
+                order      = 'C',
+                dtype      = float
+            )
+            for i in range(steps):
+                X_window_features[i, :] = np.concatenate(
+                    [wf.transform(full_predictors[i:-(steps - i)]) 
+                     for wf in self.window_features]
+                )
+            X_predict.append(X_window_features)
+
+        if exog is not None:
+            X_predict.append(exog_values)
+
+        X_predict = pd.DataFrame(
+                        data    = np.concatenate(X_predict, axis=1),
+                        columns = self.X_train_features_names_out_,
+                        index   = prediction_index
+                    )
+        
+        if self.exog_in_:
+            X_predict_dtypes = {col: float for col in self.X_train_features_names_out_}
+            X_predict_dtypes.update(self.exog_dtypes_out_)
+            X_predict = X_predict.astype(X_predict_dtypes, copy=False)
+
+        if self.transformer_exog is not None:
+            warnings.warn(
+                "The output matrix is in the transformed scale due to the "
+                "inclusion of transformations (`transformer_exog`) in the Forecaster. "
+                "As a result, any predictions generated using this matrix will also "
+                "be in the transformed scale. Please refer to the documentation "
+                "for more details: "
+                "https://skforecast.org/latest/user_guides/training-and-prediction-matrices.html",
+                DataTransformationWarning
+            )
+
+        return X_predict
+
+    def predict(
+        self,
+        steps: int | str | pd.Timestamp,
+        last_window: pd.Series | pd.DataFrame | None = None,
+        exog: pd.Series | pd.DataFrame | None = None
+    ) -> pd.Series:
+        """
+        Predict n steps ahead. It is a recursive process in which, each prediction,
+        is used as a predictor for the next step.
+        
+        Parameters
+        ----------
+        steps : int, str, pandas Timestamp
+            Number of steps to predict. 
+            
+            - If steps is int, number of steps to predict. 
+            - If str or pandas Datetime, the prediction will be up to that date.
+        last_window : pandas Series, pandas DataFrame, default None
+            Series values used to create the predictors (lags) needed in the 
+            first iteration of the prediction (t + 1).
+            If `last_window = None`, the values stored in `self.last_window_` are
+            used to calculate the initial predictors, and the predictions start
+            right after training data.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s.
+
+        Returns
+        -------
+        predictions : pandas Series
+            Predicted values (class labels).
+        
+        """
+
+        (
+            last_window_values,
+            exog_values,
+            prediction_index,
+            steps
+        ) = self._create_predict_inputs(
+                steps       = steps,
+                last_window = last_window,
+                exog        = exog
+            )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", 
+                message="X does not have valid feature names", 
+                category=UserWarning
+            )
+            predictions = self._recursive_predict(
+                              steps              = steps,
+                              last_window_values = last_window_values,
+                              exog_values        = exog_values,
+                              predict_proba      = False
+                          )
+
+        predictions = self.encoder.inverse_transform(
+            predictions.reshape(-1, 1)
+        ).ravel()
+
+        predictions = pd.Series(
+                          data  = predictions,
+                          index = prediction_index,
+                          name  = 'pred'
+                      )
+
+        return predictions
+    
+    @manage_warnings
+    def predict_proba(
+        self,
+        steps: int | str | pd.Timestamp,
+        last_window: pd.Series | pd.DataFrame | None = None,
+        exog: pd.Series | pd.DataFrame | None = None,
+        suppress_warnings: bool = False
+    ) -> pd.DataFrame:
+        """
+        Predict class probabilities n steps ahead. It is a recursive process in 
+        which the predicted class (argmax of probabilities) is used as a predictor 
+        for the next step.
+        
+        Parameters
+        ----------
+        steps : int, str, pandas Timestamp
+            Number of steps to predict.
+            
+            - If steps is int, number of steps to predict. 
+            - If str or pandas Datetime, the prediction will be up to that date.
+        last_window : pandas Series, pandas DataFrame, default None
+            Series values used to create the predictors (lags) needed in the 
+            first iteration of the prediction (t + 1).
+            If `last_window = None`, the values stored in `self.last_window_` are
+            used to calculate the initial predictors, and the predictions start
+            right after training data.
+        exog : pandas Series, pandas DataFrame, default None
+            Exogenous variable/s included as predictor/s.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings are suppressed during execution.
+            See `skforecast.exceptions.warn_skforecast_categories` for the
+            list of warnings that are suppressed.
+        
+        Returns
+        -------
+        probabilities : pandas DataFrame
+            Predicted probabilities for each class. Shape (steps, n_classes).
+            Columns are the original class labels.
+        
+        """
+
+        if not hasattr(self.estimator, 'predict_proba'):
+            raise AttributeError(
+                f"The estimator {type(self.estimator).__name__} does not have a "
+                f"`predict_proba` method. Use a estimator that supports probability "
+                f"predictions (e.g., XGBClassifier, HistGradientBoostingClassifier, etc.)."
+            )
+        
+        (
+            last_window_values,
+            exog_values,
+            prediction_index,
+            steps
+        ) = self._create_predict_inputs(
+                steps       = steps,
+                last_window = last_window,
+                exog        = exog
+            )
+        
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", 
+                message="X does not have valid feature names", 
+                category=UserWarning
+            )
+            probabilities = self._recursive_predict(
+                                steps              = steps,
+                                last_window_values = last_window_values,
+                                exog_values        = exog_values,
+                                predict_proba      = True
+                            )
+        
+        probabilities = pd.DataFrame(
+                            data    = probabilities,
+                            index   = prediction_index,
+                            columns = [f"{cls}_proba" for cls in self.classes_]
+                        )
+        
+        return probabilities
+
+    def set_params(
+        self, 
+        params: dict[str, object]
+    ) -> None:
+        """
+        Set new values to the parameters of the scikit-learn model stored in the
+        forecaster. After calling this method, the forecaster is reset to an 
+        unfitted state. The `fit` method must be called before prediction.
+        
+        Parameters
+        ----------
+        params : dict
+            Parameters values.
+
+        Returns
+        -------
+        None
+        
+        """
+
+        self.estimator = clone(self.estimator)
+        self.estimator.set_params(**params)
+        self.is_fitted = False
+
+    def set_lags(
+        self, 
+        lags: int | list[int] | np.ndarray[int] | range[int] | None = None
+    ) -> None:
+        """
+        Set new value to the attribute `lags`. Attributes `lags_names`, 
+        `max_lag` and `window_size` are also updated.
+        
+        Parameters
+        ----------
+        lags : int, list, numpy ndarray, range, default None
+            Lags used as predictors. Index starts at 1, so lag 1 is equal to t-1. 
+        
+            - `int`: include lags from 1 to `lags` (included).
+            - `list`, `1d numpy ndarray` or `range`: include only lags present in 
+            `lags`, all elements must be int.
+            - `None`: no lags are included as predictors. 
+
+        Returns
+        -------
+        None
+        
+        """
+
+        if self.window_features is None and lags is None:
+            raise ValueError(
+                "At least one of the arguments `lags` or `window_features` "
+                "must be different from None. This is required to create the "
+                "predictors used in training the forecaster."
+            )
+        
+        self.lags, self.lags_names, self.max_lag = initialize_lags(type(self).__name__, lags)
+        self.lags_are_contiguous = (
+            self.lags is not None
+            and np.array_equal(self.lags, np.arange(1, self.max_lag + 1))
+        )
+        self.window_size = max(
+            [ws for ws in [self.max_lag, self.max_size_window_features] 
+             if ws is not None]
+        )
+
+    def set_window_features(
+        self, 
+        window_features: object | list[object] | None = None
+    ) -> None:
+        """
+        Set new value to the attribute `window_features`. Attributes 
+        `max_size_window_features`, `window_features_names`, 
+        `window_features_class_names` and `window_size` are also updated.
+        
+        Parameters
+        ----------
+        window_features : object, list, default None
+            Instance or list of instances used to create window features. Window features
+            are created from the original time series and are included as predictors.
+
+        Returns
+        -------
+        None
+        
+        """
+
+        if window_features is None and self.lags is None:
+            raise ValueError(
+                "At least one of the arguments `lags` or `window_features` "
+                "must be different from None. This is required to create the "
+                "predictors used in training the forecaster."
+            )
+        
+        self.window_features, self.window_features_names, self.max_size_window_features = (
+            initialize_window_features(window_features)
+        )
+        self.window_features_class_names = None
+        if window_features is not None:
+            self.window_features_class_names = [
+                type(wf).__name__ for wf in self.window_features
+            ] 
+        self.window_size = max(
+            [ws for ws in [self.max_lag, self.max_size_window_features] 
+             if ws is not None]
+        )
+
+    def set_fit_kwargs(
+        self, 
+        fit_kwargs: dict[str, object]
+    ) -> None:
+        """
+        Set new values for the additional keyword arguments passed to the `fit` 
+        method of the estimator.
+        
+        Parameters
+        ----------
+        fit_kwargs : dict
+            Dict of the form {"argument": new_value}.
+
+        Returns
+        -------
+        None
+        
+        """
+
+        self.fit_kwargs = check_select_fit_kwargs(self.estimator, fit_kwargs=fit_kwargs)
+    
+    def get_feature_importances(
+        self,
+        sort_importance: bool = True
+    ) -> pd.DataFrame:
+        """
+        Return feature importances of the estimator stored in the forecaster.
+        Only valid when estimator stores internally the feature importances in the
+        attribute `feature_importances_` or `coef_`. Otherwise, returns `None`.
+
+        Parameters
+        ----------
+        sort_importance: bool, default True
+            If `True`, sorts the feature importances in descending order.
+
+        Returns
+        -------
+        feature_importances : pandas DataFrame
+            Feature importances associated with each predictor.
+        
+        """
+
+        if not self.is_fitted:
+            raise NotFittedError(
+                "This forecaster is not fitted yet. Call `fit` with appropriate "
+                "arguments before using `get_feature_importances()`."
+            )
+
+        estimator = self.estimator
+        if isinstance(estimator, Pipeline):
+            estimator = estimator[-1]
+
+        # Unify the estimators into a list of tuples: (sub_estimator, cv_fold_index)
+        # If it's a single estimator, fold_index is None.
+        if type(estimator).__name__ == 'CalibratedClassifierCV':
+            if not hasattr(estimator, 'calibrated_classifiers_'):
+                warnings.warn(
+                    "The CalibratedClassifierCV instance is not fitted or does not "
+                    "expose 'calibrated_classifiers_'. Unable to retrieve importances."
+                )
+                return None
+            
+            estimators_list = [
+                (clf.estimator, i) 
+                for i, clf in enumerate(estimator.calibrated_classifiers_)
+            ]
+        else:
+            estimators_list = [(estimator, None)]
+
+        dfs_to_concat = []
+        for sub_est, fold_idx in estimators_list:
+            
+            if hasattr(sub_est, 'feature_importances_'):
+                df_fold = pd.DataFrame({
+                    'feature': self.X_train_features_names_out_,
+                    'importance': sub_est.feature_importances_
+                })
+            elif hasattr(sub_est, 'coef_'):
+                df_fold = pd.DataFrame(
+                    data=sub_est.coef_,
+                    columns=self.X_train_features_names_out_
+                )
+                df_fold.insert(0, 'classes', self.classes_)
+            else:
+                continue
+
+            if fold_idx is not None:
+                df_fold.insert(0, 'cv_fold', fold_idx)
+
+            dfs_to_concat.append(df_fold)
+
+        # Handle cases where no importances could be extracted
+        if not dfs_to_concat:
+            warnings.warn(
+                f"Impossible to access feature importances for estimator of type "
+                f"{type(estimator)}. This method is only valid when the "
+                f"estimator stores internally the feature importances in the "
+                f"attribute `feature_importances_` or `coef_`."
+            )
+            return None
+
+        feature_importances = pd.concat(dfs_to_concat, axis=0, ignore_index=True)
+
+        if sort_importance and 'importance' in feature_importances.columns:
+            # If it has folds, sort by importance but keep folds grouped nicely? 
+            # Usually, just sorting by importance globally is expected, 
+            # or (Fold, -Importance). Here we prioritize global importance.
+            if 'cv_fold' in feature_importances.columns:
+                feature_importances = feature_importances.sort_values(
+                    by=['cv_fold', 'importance'], ascending=[True, False]
+                )
+            else:
+                feature_importances = feature_importances.sort_values(
+                    by='importance', ascending=False
+                )
+
+        return feature_importances

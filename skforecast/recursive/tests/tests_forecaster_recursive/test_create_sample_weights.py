@@ -75,29 +75,13 @@ X_train = pd.DataFrame(
           )
 
 
-def test_create_sample_weights_output():
-    """
-    Test sample_weights creation.
-    """
-    forecaster = ForecasterRecursive(
-                     lags        = 3,
-                     regressor   = LinearRegression(),
-                     weight_func = custom_weights
-                 )
-
-    expected = np.array([1, 0, 0, 1, 1, 1, 1])
-    results = forecaster.create_sample_weights(X_train=X_train)
-
-    assert np.array_equal(results, expected)
-
-
 def test_create_sample_weights_exceptions_when_weights_has_nan():
     """
     Test sample_weights exception when weights contains NaNs.
     """
     forecaster = ForecasterRecursive(
                      lags        = 3,
-                     regressor   = LinearRegression(),
+                     estimator   = LinearRegression(),
                      weight_func = custom_weights_nan
                  )
 
@@ -112,7 +96,7 @@ def test_create_sample_weights_exceptions_when_weights_has_negative_values():
     """
     forecaster = ForecasterRecursive(
                      lags        = 3,
-                     regressor   = LinearRegression(),
+                     estimator   = LinearRegression(),
                      weight_func = custom_weights_negative
                  )
 
@@ -127,13 +111,34 @@ def test_create_sample_weights_exceptions_when_weights_all_zeros():
     """
     forecaster = ForecasterRecursive(
                      lags        = 3,
-                     regressor   = LinearRegression(),
+                     estimator   = LinearRegression(),
                      weight_func = custom_weights_zeros
                  )
     
     err_msg = re.escape(
-                    ("The resulting `sample_weight` cannot be normalized because "
-                     "the sum of the weights is zero.")
-                )
+        "The resulting `sample_weight` cannot be normalized because "
+        "the sum of the weights is zero."
+    )
     with pytest.raises(ValueError, match=err_msg):
         forecaster.create_sample_weights(X_train=X_train)
+
+
+@pytest.mark.parametrize(
+    "X_train",
+    [X_train, X_train.index],
+    ids=lambda X_tr: f'X_train: {type(X_tr)}'
+)
+def test_create_sample_weights_output(X_train):
+    """
+    Test sample_weights creation.
+    """
+    forecaster = ForecasterRecursive(
+                     lags        = 3,
+                     estimator   = LinearRegression(),
+                     weight_func = custom_weights
+                 )
+
+    expected = np.array([1, 0, 0, 1, 1, 1, 1])
+    results = forecaster.create_sample_weights(X_train=X_train)
+
+    assert np.array_equal(results, expected)

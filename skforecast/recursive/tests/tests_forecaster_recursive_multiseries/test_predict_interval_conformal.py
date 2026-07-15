@@ -1,9 +1,7 @@
 # Unit test _predict_interval_conformal ForecasterRecursiveMultiSeries
 # ==============================================================================
-import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from lightgbm import LGBMRegressor
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler
@@ -12,25 +10,23 @@ from sklearn.linear_model import LinearRegression
 from skforecast.recursive import ForecasterRecursiveMultiSeries
 
 # Fixtures
-from .fixtures_forecaster_recursive_multiseries import series, exog, exog_predict
+from .fixtures_forecaster_recursive_multiseries import (
+    series_dict_range,
+    exog_wide_range,
+    exog_pred_wide_range,
+    series_dict_nans_train,
+    exog_dict_nans_train,
+    exog_dict_nans_test
+)
 
-THIS_DIR = Path(__file__).parent
-series_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series.joblib')
-exog_dict = joblib.load(THIS_DIR/'fixture_sample_multi_series_exog.joblib')
-end_train = "2016-07-31 23:59:00"
-series_dict_train = {k: v.loc[:end_train,] for k, v in series_dict.items()}
-exog_dict_train = {k: v.loc[:end_train,] for k, v in exog_dict.items()}
-series_dict_test = {k: v.loc[end_train:,] for k, v in series_dict.items()}
-exog_dict_test = {k: v.loc[end_train:,] for k, v in exog_dict.items()}
-series_2 = pd.DataFrame({
-    'l1': pd.Series(np.arange(10)),
-    'l2': pd.Series(np.arange(10))
-})
+series_2 = pd.DataFrame(
+    {'l1': pd.Series(np.arange(10)), 'l2': pd.Series(np.arange(10))}
+).to_dict(orient='series')
 
 
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_1_in_sample_residuals_is_True():
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using in sample residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3)
@@ -57,7 +53,7 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
 
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_is_True():
     """
-    Test output when regressor is LinearRegression and two step ahead is predicted
+    Test output when estimator is LinearRegression and two step ahead is predicted
     using in sample residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3)
@@ -86,7 +82,7 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
 
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_is_False():
     """
-    Test output when regressor is LinearRegression and two step ahead is predicted
+    Test output when estimator is LinearRegression and two step ahead is predicted
     using out sample residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3)
@@ -113,16 +109,16 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_with_transform_series():
+def test_predict_interval_conformal_output_when_with_transform_series():
     """
-    Test _predict_interval_conformal output when using LinearRegression as regressor and StandardScaler.
+    Test _predict_interval_conformal output when using LinearRegression as estimator and StandardScaler.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 5,
                      transformer_series = StandardScaler()
                  )
-    forecaster.fit(series=series, store_in_sample_residuals=True)
+    forecaster.fit(series=series_dict_range, store_in_sample_residuals=True)
     results = forecaster._predict_interval_conformal(
         steps=5, nominal_coverage=0.95, use_in_sample_residuals=True, use_binned_residuals=False
     )
@@ -142,14 +138,14 @@ def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_wi
                    columns = ['pred', 'lower_bound', 'upper_bound'],
                    index   = pd.Index([50, 50, 51, 51, 52, 52, 53, 53, 54, 54])
                )
-    expected.insert(0, 'level', np.array(['1', '2'] * 5))
+    expected.insert(0, 'level', np.array(['l1', 'l2'] * 5))
     
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_with_transform_series_and_transform_exog():
+def test_predict_interval_conformal_output_when_with_transform_series_and_transform_exog():
     """
-    Test _predict_interval_conformal output when using LinearRegression as regressor, StandardScaler
+    Test _predict_interval_conformal output when using LinearRegression as estimator, StandardScaler
     as transformer_series and transformer_exog as transformer_exog.
     """
     transformer_exog = ColumnTransformer(
@@ -159,14 +155,16 @@ def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_wi
                             verbose_feature_names_out = False
                        )
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      lags               = 5,
                      transformer_series = StandardScaler(),
                      transformer_exog   = transformer_exog,
                  )
-    forecaster.fit(series=series, exog=exog, store_in_sample_residuals=True)
+    forecaster.fit(
+        series=series_dict_range, exog=exog_wide_range, store_in_sample_residuals=True
+    )
     results = forecaster._predict_interval_conformal(
-        steps=5, levels=['1', '2'], exog=exog_predict, nominal_coverage=0.95,
+        steps=5, levels=['l1', 'l2'], exog=exog_pred_wide_range, nominal_coverage=0.95,
         use_in_sample_residuals=True, use_binned_residuals=False
     )
     
@@ -186,7 +184,7 @@ def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_wi
                    columns = ['pred', 'lower_bound', 'upper_bound'],
                    index   = pd.Index([50, 50, 51, 51, 52, 52, 53, 53, 54, 54])
                )
-    expected.insert(0, 'level', np.array(['1', '2'] * 5))
+    expected.insert(0, 'level', np.array(['l1', 'l2'] * 5))
     
     pd.testing.assert_frame_equal(results, expected)
 
@@ -197,7 +195,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict():
     exog are dictionaries.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-        regressor=LGBMRegressor(
+        estimator=LGBMRegressor(
             n_estimators=2, random_state=123, verbose=-1, max_depth=2
         ),
         lags=14,
@@ -207,11 +205,11 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict():
         transformer_exog=StandardScaler(),
     )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
     results = forecaster._predict_interval_conformal(
-        steps=5, exog=exog_dict_test, nominal_coverage=0.95, 
+        steps=5, exog=exog_dict_nans_test, nominal_coverage=0.95, 
         use_in_sample_residuals=True, use_binned_residuals=False
     )
 
@@ -341,7 +339,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_unknown_lev
     exog are dictionaries and unknown_level.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -351,7 +349,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_unknown_lev
                      transformer_exog   = StandardScaler()
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -360,7 +358,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_unknown_lev
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster._predict_interval_conformal(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
@@ -518,7 +516,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_unknown_lev
     exog are dictionaries, unknown_level and binned_residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -528,7 +526,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_unknown_lev
                      transformer_exog   = StandardScaler()
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -537,7 +535,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_unknown_lev
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster._predict_interval_conformal(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
@@ -695,7 +693,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
     exog are dictionaries, encoding is None and unknown_level.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -706,7 +704,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
                      differentiation    = 1
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -715,7 +713,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster._predict_interval_conformal(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
@@ -783,54 +781,54 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
                 1389.1308706079765,
                 1845.201167248069,
                 5860.775578280901,
-                5209.368759022615,
-                -2128.266255484796,
-                -69.84098807230976,
-                46.375995824188976,
-                4437.240435806765,
-                3785.83361654848,
-                -3891.1100187298966,
-                -1709.1284886007757,
-                -1895.2075428160347,
-                2743.179353410692,
-                2050.360826289977,
-                -5664.2345459630815,
-                -3460.0158814409547,
-                -3601.0100217758322,
-                1014.7522653360097,
-                379.9623174528183,
-                -7401.377665017488,
-                -5190.303042730435,
-                -5215.519792087081,
-                -685.2390440510458,
-                -1320.0289919342372,
+                5209.3687590226145,
+                -1120.5748235369233,
+                937.8504438755626,
+                1054.0674277720618,
+                5444.931867754639,
+                4793.5250484963535,
+                -1709.9370599734625,
+                472.0444701556585,
+                285.965415940399,
+                4924.352312167126,
+                4231.533785046411,
+                -2223.7607923194887,
+                -19.54212779736099,
+                -160.536268132239,
+                4455.226018979603,
+                3820.4360710964124,
+                -2646.759874883976,
+                -435.6852525969207,
+                -460.9020019535674,
+                4069.3787460824683,
+                3434.5887981992773,
             ],
             "upper_bound": [
                 2982.1695321943766,
                 4829.6046242515695,
                 5285.674920891663,
-                9301.249331924495,
+                9301.249331924493,
                 8649.842512666208,
-                4752.681251802391,
-                6811.106519214877,
-                6927.323503111376,
-                11318.187943093952,
-                10666.781123835668,
-                6430.3112422008835,
-                8612.292772330005,
-                8426.213718114745,
-                13064.600614341474,
-                12371.78208722076,
-                8097.660468611291,
-                10301.87913313342,
-                10160.884992798543,
-                14776.647279910385,
-                14141.857332027193,
-                9800.991103200478,
-                12012.065725487535,
-                11986.848976130887,
-                16517.129724166924,
-                15882.339776283732,
+                3744.9898198545184,
+                5803.415087267004,
+                5919.6320711635035,
+                10310.49651114608,
+                9659.089691887795,
+                4249.13828344445,
+                6431.11981357357,
+                6245.040759358311,
+                10883.427655585037,
+                10190.609128464323,
+                4657.186714967698,
+                6861.405379489826,
+                6720.411239154948,
+                11336.17352626679,
+                10701.383578383598,
+                5046.373313066964,
+                7257.447935354019,
+                7232.231185997372,
+                11762.51193403341,
+                11127.721986150218,
             ],
         },
         index=pd.DatetimeIndex(
@@ -873,7 +871,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
     exog are dictionaries, encoding is None, unknown_level and binned_residuals.
     """
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LGBMRegressor(
+                     estimator          = LGBMRegressor(
                          n_estimators=30, random_state=123, verbose=-1, max_depth=4
                      ),
                      lags               = 14,
@@ -884,7 +882,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
                      differentiation    = 1
                  )
     forecaster.fit(
-        series=series_dict_train, exog=exog_dict_train, 
+        series=series_dict_nans_train, exog=exog_dict_nans_train, 
         store_in_sample_residuals=True, suppress_warnings=True
     )
 
@@ -893,7 +891,7 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
         {k: v for k, v in forecaster.last_window_.items() if k in levels}
     )
     last_window['id_1005'] = last_window['id_1004'] * 0.9
-    exog_dict_test_2 = exog_dict_test.copy()
+    exog_dict_test_2 = exog_dict_nans_test.copy()
     exog_dict_test_2['id_1005'] = exog_dict_test_2['id_1001']
     results = forecaster._predict_interval_conformal(
         steps=5, levels=levels, last_window=last_window, exog=exog_dict_test_2,
@@ -959,29 +957,29 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
             "lower_bound": [
                 -98.64486847220087,
                 2548.8495539617647,
-                2677.877796699927,
+                2677.8777966999273,
                 4708.300372249577,
                 4056.8935529912915,
-                -785.7588306649855,
-                1449.5370482584945,
-                1711.7292547279053,
-                3644.424582752458,
-                2993.0177634941733,
-                -1371.2502775914295,
-                969.9682310838166,
-                907.0743466377785,
-                2933.211572199178,
-                2618.2910190880207,
-                -1967.0224885059574,
-                396.4331545622954,
-                184.11993952077592,
-                2565.5305299768465,
-                1930.7405820936567,
-                -2343.4195617080136,
-                26.89203912516632,
-                -270.67114743668526,
-                1848.3872924325863,
-                1213.5973445493962,
+                269.38224941540284,
+                1446.4855786899914,
+                2231.650010213996,
+                5953.567002569067,
+                5302.160183310782,
+                329.2969702993555,
+                2480.736152211302,
+                2255.183568632873,
+                6626.69510871995,
+                6588.4150726611315,
+                130.9438403178251,
+                2335.162504839953,
+                1805.1598755533496,
+                7176.718110684305,
+                5786.132214782001,
+                395.9607837559265,
+                2607.0354060429813,
+                2132.3078088020566,
+                6267.093846277553,
+                5632.3038983943625,
             ],
             "upper_bound": [
                 2622.5101792173605,
@@ -989,26 +987,26 @@ def test_predict_interval_conformal_output_when_series_and_exog_dict_encoding_No
                 4452.998291439804,
                 10453.724537955817,
                 9802.317718697532,
-                3410.1738269825805,
-                5291.728482884073,
-                5261.97024420766,
-                12111.003796148261,
-                11459.596976889974,
-                3910.4515010624164,
-                5933.196052645412,
-                5623.931828660932,
-                12874.568395552986,
-                11803.851894422714,
-                4400.448411154167,
-                6445.430097130169,
-                6375.755031501934,
-                13225.869015269547,
-                12591.079067386356,
-                4743.032999891004,
-                6794.870643631933,
-                7042.000331480489,
-                13983.503387683291,
-                13348.7134398001,
+                2355.0327469021922,
+                5294.779952452575,
+                4742.049488721568,
+                9801.861376331652,
+                9150.454557073366,
+                2209.904253171632,
+                4422.428131517926,
+                4275.822606665837,
+                9181.084859032213,
+                7833.727840849602,
+                2302.482082330384,
+                4506.700746852512,
+                4754.71509546936,
+                8614.68143456209,
+                8735.687434698011,
+                2003.6526544270625,
+                4214.727276714118,
+                4639.021375241748,
+                9564.796833838323,
+                8930.006885955132,
             ],
         },
         index=pd.DatetimeIndex(

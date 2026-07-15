@@ -11,6 +11,7 @@ from skforecast.model_selection._split import BaseFold
 valid_params = {
     "steps": 5,
     "initial_train_size": 100,
+    'fold_stride': None,
     "window_size": 10,
     "differentiation": None,
     "refit": True,
@@ -95,6 +96,28 @@ def test_basefold_validate_params_raise_invalid_initial_train_size_TimeSeriesFol
     # Test valid pandas Timestamp
     params["initial_train_size"] = pd.Timestamp("2022-01-01")
     cv._validate_params(cv_name="TimeSeriesFold", **params)
+
+
+def test_basefold_validate_params_raise_invalid_fold_stride():
+    """
+    Test that TypeError is raised when fold_stride is invalid.
+    """
+    cv = BaseFold()
+    params = dict(valid_params)
+    params["fold_stride"] = 0
+    msg = f"`fold_stride` must be an integer greater than 0. Got {params['fold_stride']}."
+    with pytest.raises(ValueError, match=msg):
+        cv._validate_params(cv_name="TimeSeriesFold", **params)
+
+    params["fold_stride"] = "invalid"
+    msg = f"`fold_stride` must be an integer greater than 0. Got {params['fold_stride']}."
+    with pytest.raises(ValueError, match=msg):
+        cv._validate_params(cv_name="TimeSeriesFold", **params)
+
+    params["fold_stride"] = 1.0
+    msg = f"`fold_stride` must be an integer greater than 0. Got {params['fold_stride']}."
+    with pytest.raises(ValueError, match=msg):
+        cv._validate_params(cv_name="TimeSeriesFold", **params)
 
 
 def test_basefold_validate_params_raise_invalid_refit():
@@ -361,17 +384,21 @@ def test_basefold_extract_index_when_X_is_dict():
     pd.testing.assert_index_equal(index, expected_index)
 
 
-def test_basefold_extract_index_raise_error_when_X_is_dict_with_series_with_different_freq():
+def test_basefold_extract_index_raise_error_when_X_is_dict_with_series_with_no_valid_index():
     """
-    Test that ValueError is raised when X is a dict with series with different frequencies.
+    Test that TypeError is raised when X is a dict with series with no valid index type.
     """
     cv = BaseFold()
     X = {
         "a": pd.Series(np.arange(10), index=pd.date_range(start="2022-01-01", periods=10, freq="D")),
-        "b": pd.Series(np.arange(10), index=pd.date_range(start="2022-01-10", periods=10, freq="h")),
+        "b": pd.Series(np.arange(10), index=pd.Index(np.arange(10))),
     }
-    msg = 'All series with frequency must have the same frequency.'
-    with pytest.raises(ValueError, match=msg):
+    msg = re.escape(
+        "If `X` is a dictionary, all series must have a Pandas "
+        "RangeIndex or DatetimeIndex with the same step/frequency. "
+        "Review series: ['b']"
+    )
+    with pytest.raises(TypeError, match=msg):
         cv._extract_index(X)
 
 
@@ -386,7 +413,29 @@ def test_basefold_extract_index_raise_error_when_X_is_dict_with_series_non_with_
     }
     X["a"].index.freq = None
     X["b"].index.freq = None
-    msg = 'At least one series must have a frequency.'
+    msg = re.escape(
+        "If `X` is a dictionary, all series must have a Pandas "
+        "RangeIndex or DatetimeIndex with the same step/frequency. "
+        "Found series with no frequency or step."
+    )
+    with pytest.raises(ValueError, match=msg):
+        cv._extract_index(X)
+
+
+def test_basefold_extract_index_raise_error_when_X_is_dict_with_series_with_different_freq():
+    """
+    Test that ValueError is raised when X is a dict with series with different frequencies.
+    """
+    cv = BaseFold()
+    X = {
+        "a": pd.Series(np.arange(10), index=pd.date_range(start="2022-01-01", periods=10, freq="D")),
+        "b": pd.Series(np.arange(10), index=pd.date_range(start="2022-01-10", periods=10, freq="2D")),
+    }
+    msg = re.escape(
+        "If `X` is a dictionary, all series must have a Pandas "
+        "RangeIndex or DatetimeIndex with the same step/frequency. "
+        "Found frequencies: [<Day>, <2 * Days>]"
+    )
     with pytest.raises(ValueError, match=msg):
         cv._extract_index(X)
 
@@ -409,15 +458,15 @@ def test_basefold_set_params_valid_params():
     """
     Test set_params method with valid parameters.
     """
-    cv = BaseFold(steps=3, initial_train_size=10)
+    cv = BaseFold(initial_train_size=10, window_size=4)
     new_params = {
-        'steps': 5,
         'initial_train_size': 15,
+        'window_size': 5,
         'verbose': False
     }
     cv.set_params(new_params)
-    assert cv.steps == 5
     assert cv.initial_train_size == 15
+    assert cv.window_size == 5
     assert cv.verbose is False
 
 
@@ -425,9 +474,10 @@ def test_set_params_partial_update_and_unknown_param():
     """
     Test set_params method with partial update of parameters.
     """
-    cv = BaseFold(steps=3, initial_train_size=10, verbose=True)
+    cv = BaseFold(initial_train_size=10, window_size=4, verbose=True)
     new_params = {
-        'steps': 5,
+        'initial_train_size': 15,
+        'window_size': 4,
         'unknown_param': 5
     }
     warn_msg = re.escape(
@@ -436,6 +486,6 @@ def test_set_params_partial_update_and_unknown_param():
     with pytest.warns(IgnoredArgumentWarning, match=warn_msg):
         cv.set_params(new_params)
     
-    assert cv.steps == 5
-    assert cv.initial_train_size == 10
+    assert cv.initial_train_size == 15
+    assert cv.window_size == 4
     assert cv.verbose is True

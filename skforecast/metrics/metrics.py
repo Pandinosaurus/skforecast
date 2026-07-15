@@ -17,7 +17,12 @@ from sklearn.metrics import (
     mean_absolute_percentage_error,
     mean_squared_log_error,
     median_absolute_error,
-    mean_pinball_loss
+    mean_pinball_loss,
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score
 )
 
 
@@ -38,6 +43,7 @@ def _get_metric(metric: str) -> Callable:
     """
 
     allowed_metrics = [
+        # Regression metrics
         "mean_squared_error",
         "mean_absolute_error",
         "mean_absolute_percentage_error",
@@ -45,19 +51,33 @@ def _get_metric(metric: str) -> Callable:
         "mean_absolute_scaled_error",
         "root_mean_squared_scaled_error",
         "median_absolute_error",
+        "symmetric_mean_absolute_percentage_error",
+
+        # Classification metrics
+        "accuracy_score",
+        "balanced_accuracy_score",
+        "f1_score",
+        "precision_score",
+        "recall_score"
     ]
 
     if metric not in allowed_metrics:
-        raise ValueError((f"Allowed metrics are: {allowed_metrics}. Got {metric}."))
+        raise ValueError(f"Allowed metrics are: {allowed_metrics}. Got {metric}.")
 
     metrics = {
         "mean_squared_error": mean_squared_error,
-        "mean_absolute_error": mean_absolute_error,
-        "mean_absolute_percentage_error": mean_absolute_percentage_error,
-        "mean_squared_log_error": mean_squared_log_error,
-        "mean_absolute_scaled_error": mean_absolute_scaled_error,
-        "root_mean_squared_scaled_error": root_mean_squared_scaled_error,
-        "median_absolute_error": median_absolute_error,
+        "mean_absolute_error":  mean_absolute_error,
+        "mean_absolute_percentage_error":  mean_absolute_percentage_error,
+        "mean_squared_log_error":  mean_squared_log_error,
+        "mean_absolute_scaled_error":  mean_absolute_scaled_error,
+        "root_mean_squared_scaled_error":  root_mean_squared_scaled_error,
+        "median_absolute_error":  median_absolute_error,
+        "symmetric_mean_absolute_percentage_error": symmetric_mean_absolute_percentage_error,
+        "accuracy_score": accuracy_score,
+        "balanced_accuracy_score": balanced_accuracy_score,
+        "f1_score": f1_score,
+        "precision_score": precision_score,
+        "recall_score": recall_score
     }
 
     metric = add_y_train_argument(metrics[metric])
@@ -84,6 +104,7 @@ def add_y_train_argument(func: Callable) -> Callable:
     sig = inspect.signature(func)
     
     if "y_train" in sig.parameters:
+        func._needs_y_train = True
         return func
 
     new_params = list(sig.parameters.values()) + [
@@ -96,14 +117,34 @@ def add_y_train_argument(func: Callable) -> Callable:
         return func(*args, **kwargs)
     
     wrapper.__signature__ = new_sig
+    wrapper._needs_y_train = False
     
     return wrapper
 
 
+def _any_metric_needs_y_train(metrics: list) -> bool:
+    """
+    Check if any metric in the list requires `y_train`.
+
+    Parameters
+    ----------
+    metrics : list
+        List of metric callables, already processed by `add_y_train_argument`.
+
+    Returns
+    -------
+    needs : bool
+        `True` if at least one metric needs `y_train`, `False` otherwise.
+
+    """
+
+    return any(getattr(m, '_needs_y_train', True) for m in metrics)
+
+
 def mean_absolute_scaled_error(
-    y_true: pd.Series | np.ndarray,
-    y_pred: pd.Series | np.ndarray,
-    y_train: list[float] | pd.Series | np.ndarray,
+    y_true: np.ndarray | pd.Series,
+    y_pred: np.ndarray | pd.Series,
+    y_train: list[float] | np.ndarray | pd.Series,
 ) -> float:
     """
     Mean Absolute Scaled Error (MASE)
@@ -168,9 +209,9 @@ def mean_absolute_scaled_error(
 
 
 def root_mean_squared_scaled_error(
-    y_true: pd.Series | np.ndarray,
-    y_pred: pd.Series | np.ndarray,
-    y_train: list[float] | pd.Series | np.ndarray,
+    y_true: np.ndarray | pd.Series,
+    y_pred: np.ndarray | pd.Series,
+    y_train: list[float] | np.ndarray | pd.Series,
 ) -> float:
     """
     Root Mean Squared Scaled Error (RMSSE)
@@ -216,8 +257,8 @@ def root_mean_squared_scaled_error(
         for x in y_train:
             if not isinstance(x, (pd.Series, np.ndarray)):
                 raise TypeError(
-                    ("When `y_train` is a list, each element must be a pandas Series "
-                     "or numpy ndarray.")
+                    "When `y_train` is a list, each element must be a pandas Series "
+                    "or numpy ndarray."
                 )
     if len(y_true) != len(y_pred):
         raise ValueError("`y_true` and `y_pred` must have the same length.")
@@ -315,6 +356,9 @@ def crps_from_quantiles(
             "The number of predicted quantiles and quantile levels must be equal."
         )
 
+    if np.any((quantile_levels < 0) | (quantile_levels > 1)):
+        raise ValueError("All quantile levels must be between 0 and 1.")
+
     sorted_indices = np.argsort(pred_quantiles)
     pred_quantiles = pred_quantiles[sorted_indices]
     quantile_levels = quantile_levels[sorted_indices]
@@ -391,7 +435,7 @@ def calculate_coverage(
     return coverage
 
 
-def create_mean_pinball_loss(alpha: float) -> callable:
+def create_mean_pinball_loss(alpha: float) -> Callable:
     """
     Create pinball loss, also known as quantile loss, for a given quantile.
     Internally, it uses the `mean_pinball_loss` function from scikit-learn.
@@ -414,3 +458,72 @@ def create_mean_pinball_loss(alpha: float) -> callable:
         return mean_pinball_loss(y_true, y_pred, alpha=alpha)
     
     return mean_pinball_loss_q
+
+
+def symmetric_mean_absolute_percentage_error(
+    y_true: np.ndarray | pd.Series,
+    y_pred: np.ndarray | pd.Series
+) -> float:
+    """
+    Compute the Symmetric Mean Absolute Percentage Error (SMAPE).
+
+    SMAPE is a relative error metric used to measure the accuracy 
+    of forecasts. Unlike MAPE, it is symmetric and prevents division 
+    by zero by averaging the absolute values of actual and predicted values.
+
+    The result is expressed as a percentage and ranges from 0% 
+    (perfect prediction) to 200% (maximum error).
+
+    Parameters
+    ----------
+    y_true : numpy ndarray, pandas Series
+        True values of the target variable.
+    y_pred : numpy ndarray, pandas Series
+        Predicted values of the target variable.
+
+    Returns
+    -------
+    smape : float
+        SMAPE value as a percentage.
+
+    Notes
+    -----
+    When both `y_true` and `y_pred` are zero, the corresponding term is treated as zero
+    to avoid division by zero.
+
+    Examples
+    --------
+    ```python
+    import numpy as np
+    from skforecast.metrics import symmetric_mean_absolute_percentage_error
+    
+    y_true = np.array([100, 200, 0])
+    y_pred = np.array([110, 180, 10])
+    result = symmetric_mean_absolute_percentage_error(y_true, y_pred)
+    print(f"SMAPE: {result:.2f}%")
+    
+    # SMAPE: 73.35%
+    ```
+
+    """
+
+    if not isinstance(y_true, (pd.Series, np.ndarray)):
+        raise TypeError("`y_true` must be a pandas Series or numpy ndarray.")
+    if not isinstance(y_pred, (pd.Series, np.ndarray)):
+        raise TypeError("`y_pred` must be a pandas Series or numpy ndarray.")
+    if len(y_true) != len(y_pred):
+        raise ValueError("`y_true` and `y_pred` must have the same length.")
+    if len(y_true) == 0 or len(y_pred) == 0:
+        raise ValueError("`y_true` and `y_pred` must have at least one element.")
+    
+    numerator = np.abs(y_true - y_pred)
+    denominator = (np.abs(y_true) + np.abs(y_pred)) / 2
+    
+    # NOTE: Avoid division by zero
+    mask = denominator != 0
+    smape_values = np.zeros_like(denominator)
+    smape_values[mask] = numerator[mask] / denominator[mask]
+
+    smape = 100 * np.mean(smape_values)
+    
+    return smape

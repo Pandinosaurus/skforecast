@@ -13,11 +13,11 @@ series_2 = pd.DataFrame({'l1': np.arange(10), 'l2': np.arange(10, 20)})
 
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_1_in_sample_residuals_is_True():
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using in sample residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
     )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
     forecaster.in_sample_residuals_ = {
@@ -39,11 +39,11 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
     
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_is_True():
     """
-    Test output when regressor is LinearRegression and two step ahead is predicted
+    Test output when estimator is LinearRegression and two step ahead is predicted
     using in sample residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
     )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
     forecaster.in_sample_residuals_ = {
@@ -66,11 +66,11 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
     
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_1_in_sample_residuals_is_False():
     """
-    Test output when regressor is LinearRegression and one step ahead is predicted
+    Test output when estimator is LinearRegression and one step ahead is predicted
     using out sample residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
     )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
     forecaster.out_sample_residuals_ = {
@@ -93,11 +93,11 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
     
 def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_is_False():
     """
-    Test output when regressor is LinearRegression and two step ahead is predicted
+    Test output when estimator is LinearRegression and two step ahead is predicted
     using out sample residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', steps=2, lags=3, transformer_series=None
     )
     forecaster.fit(series=series_2, store_in_sample_residuals=True)
     forecaster.out_sample_residuals_ = {
@@ -119,12 +119,12 @@ def test_predict_interval_conformal_output_when_forecaster_is_LinearRegression_s
     pd.testing.assert_frame_equal(results, expected)
 
 
-def test_predict_interval_conformal_output_when_regressor_is_LinearRegression():
+def test_predict_interval_conformal_output_when_estimator_is_LinearRegression():
     """
-    Test predict output when using LinearRegression as regressor and StandardScaler.
+    Test predict output when using LinearRegression as estimator and StandardScaler.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      steps              = 3,
                      lags               = 3,
@@ -142,17 +142,17 @@ def test_predict_interval_conformal_output_when_regressor_is_LinearRegression():
                    index = pd.RangeIndex(start=50, stop=53, step=1),
                    columns = ['pred', 'lower_bound', 'upper_bound']
                )
-    expected.insert(0, 'level', np.tile(['l1'], forecaster.steps))
+    expected.insert(0, 'level', np.tile(['l1'], forecaster.max_step))
     
     pd.testing.assert_frame_equal(results, expected)
 
 
 def test_predict_interval_conformal_output():
     """
-    Test predict output when using LinearRegression as regressor and StandardScaler.
+    Test predict output when using LinearRegression as estimator and StandardScaler.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      steps              = 3,
                      lags               = 3,
@@ -170,18 +170,18 @@ def test_predict_interval_conformal_output():
                    index = pd.RangeIndex(start=50, stop=53, step=1),
                    columns = ['pred', 'lower_bound', 'upper_bound']
                )
-    expected.insert(0, 'level', np.tile(['l1'], forecaster.steps))
+    expected.insert(0, 'level', np.tile(['l1'], forecaster.max_step))
     
     pd.testing.assert_frame_equal(results, expected)
 
 
 def test_predict_interval_conformal_output_when_out_sample_residuals():
     """
-    Test predict output when using LinearRegression as regressor, StandardScaler
+    Test predict output when using LinearRegression as estimator, StandardScaler
     as out-sample residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      steps              = 3,
                      lags               = 3,
@@ -201,7 +201,7 @@ def test_predict_interval_conformal_output_when_out_sample_residuals():
                    index = pd.RangeIndex(start=50, stop=53, step=1),
                    columns = ['pred', 'lower_bound', 'upper_bound']
                )
-    expected.insert(0, 'level', np.tile(['l1'], forecaster.steps))
+    expected.insert(0, 'level', np.tile(['l1'], forecaster.max_step))
     
     pd.testing.assert_frame_equal(results, expected)
 
@@ -211,7 +211,7 @@ def test_predict_interval_conformal_output_binned_residuals():
     Test predict output when using binned residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      steps              = 3,
                      lags               = 3,
@@ -230,7 +230,7 @@ def test_predict_interval_conformal_output_binned_residuals():
                    index = pd.RangeIndex(start=50, stop=53, step=1),
                    columns = ['pred', 'lower_bound', 'upper_bound']
                )
-    expected.insert(0, 'level', np.tile(['l1'], forecaster.steps))
+    expected.insert(0, 'level', np.tile(['l1'], forecaster.max_step))
     
     pd.testing.assert_frame_equal(results, expected)
 
@@ -240,7 +240,7 @@ def test_predict_interval_conformal_output_binned__out_sample_residuals():
     Test predict output when using binned out-sample residuals.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      steps              = 3,
                      lags               = 3,
@@ -261,17 +261,20 @@ def test_predict_interval_conformal_output_binned__out_sample_residuals():
                    index = pd.RangeIndex(start=50, stop=53, step=1),
                    columns = ['pred', 'lower_bound', 'upper_bound']
                )
-    expected.insert(0, 'level', np.tile(['l1'], forecaster.steps))
+    expected.insert(0, 'level', np.tile(['l1'], forecaster.max_step))
     
     pd.testing.assert_frame_equal(results, expected)
 
 
 def test_predict_interval_conformal_output_with_differentiation():
     """
-    Test predict output when using differentiation.
+    Test predict output when using differentiation. Prediction intervals should
+    grow with sqrt(h) for d=1 (not linearly), as the correct scaling of the
+    conformal correction factor is applied based on the MA(inf) representation
+    of the (1-B)^{-d} filter.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      steps              = 3,
                      lags               = 3,
@@ -286,11 +289,11 @@ def test_predict_interval_conformal_output_with_differentiation():
     expected = pd.DataFrame(
                    data = np.array([
                             [ 0.75141456,  0.26049601,  1.24233311],
-                            [ 0.64535259, -0.33648452,  1.62718969],
-                            [ 0.63651233, -0.83624333,  2.10926798]]),
+                            [ 0.64535258, -0.04891109,  1.33961626],
+                            [ 0.63651232, -0.21378355,  1.48680819]]),
                    index = pd.RangeIndex(start=50, stop=53, step=1),
                    columns = ['pred', 'lower_bound', 'upper_bound']
                )
-    expected.insert(0, 'level', np.tile(['l1'], forecaster.steps))
+    expected.insert(0, 'level', np.tile(['l1'], forecaster.max_step))
     
     pd.testing.assert_frame_equal(results, expected)

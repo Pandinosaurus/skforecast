@@ -1,19 +1,32 @@
 # Unit test fit ForecasterRecursiveMultiSeries
 # ==============================================================================
+import re
 import pytest
 from pytest import approx
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import OneHotEncoder
-from skforecast.preprocessing import RollingFeatures
+from catboost import CatBoostRegressor
+from lightgbm import LGBMRegressor
+from xgboost import XGBRegressor
+
+from skforecast.exceptions import MissingExogWarning
+from skforecast.preprocessing import RollingFeatures, CalendarFeatures
 from ....recursive import ForecasterRecursiveMultiSeries
 
 # Fixtures
-from .fixtures_forecaster_recursive_multiseries import series
-from .fixtures_forecaster_recursive_multiseries import exog
+from .fixtures_forecaster_recursive_multiseries import (
+    series_wide_range,
+    series_dict_range,
+    series_dict_dt,
+    exog_wide_range,
+    exog_wide_dt,
+    exog_dict_range
+)
 
 transformer_exog = ColumnTransformer(
                        [('scale', StandardScaler(), ['exog_1']),
@@ -23,31 +36,119 @@ transformer_exog = ColumnTransformer(
                    )
 
 
+@pytest.mark.parametrize(
+    "forecaster_kwargs",
+    [
+        {"estimator": LinearRegression(), "lags": 3},
+        {"estimator": LinearRegression(), "lags": 3,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=4)},
+        {"estimator": LinearRegression(), "lags": 3,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=4),
+         "transformer_series": StandardScaler(), "transformer_exog": StandardScaler()},
+        {"estimator": LinearRegression(), "lags": 3,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=4),
+         "transformer_series": StandardScaler(), "transformer_exog": StandardScaler(),
+         "differentiation": 1},
+    ],
+    ids=["base", "window_features", "transformers", "differentiation"]
+)
+def test_forecaster_fit_does_not_modify_series_exog(forecaster_kwargs):
+    """
+    Test forecaster.fit does not modify series and exog.
+    """
+    series_local = series_wide_range.copy()
+    exog_local = exog_wide_range[['exog_1']].copy()
+    series_copy = series_local.copy()
+    exog_copy = exog_local.copy()
+
+    forecaster = ForecasterRecursiveMultiSeries(**forecaster_kwargs)
+    forecaster.fit(series=series_local, exog=exog_local)
+
+    pd.testing.assert_frame_equal(series_local, series_copy)
+    pd.testing.assert_frame_equal(exog_local, exog_copy)
+
+
+@pytest.mark.parametrize(
+    "forecaster_kwargs",
+    [
+        {"estimator": LinearRegression(), "lags": 3},
+        {"estimator": LinearRegression(), "lags": 3,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=4)},
+        {"estimator": LinearRegression(), "lags": 3,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=4),
+         "transformer_series": StandardScaler(), "transformer_exog": StandardScaler()},
+        {"estimator": LinearRegression(), "lags": 3,
+         "window_features": RollingFeatures(stats=['mean'], window_sizes=4),
+         "transformer_series": StandardScaler(), "transformer_exog": StandardScaler(),
+         "differentiation": 1},
+    ],
+    ids=["base", "window_features", "transformers", "differentiation"]
+)
+def test_forecaster_fit_does_not_modify_series_exog_dict(forecaster_kwargs):
+    """
+    Test forecaster.fit does not modify series and exog when passed as dictionaries.
+    """
+    exog_dict_numeric = {
+        'l1': exog_wide_range[['exog_1']].copy(),
+        'l2': exog_wide_range['exog_1'].copy(),
+    }
+    series_local = {k: v.copy() for k, v in series_dict_range.items()}
+    exog_local = {k: v.copy() for k, v in exog_dict_numeric.items()}
+    series_copy = {k: v.copy() for k, v in series_local.items()}
+    exog_copy = {k: v.copy() for k, v in exog_local.items()}
+
+    forecaster = ForecasterRecursiveMultiSeries(**forecaster_kwargs)
+    forecaster.fit(series=series_local, exog=exog_local)
+
+    for k in series_local:
+        pd.testing.assert_series_equal(series_local[k], series_copy[k])
+    for k in exog_local:
+        if isinstance(exog_local[k], pd.DataFrame):
+            pd.testing.assert_frame_equal(exog_local[k], exog_copy[k])
+        else:
+            pd.testing.assert_series_equal(exog_local[k], exog_copy[k])
+
+
 def test_forecaster_series_exog_features_stored():
     """
     Test forecaster stores series and exog features after fitting.
     """
+
     rolling = RollingFeatures(
         stats=['ratio_min_max', 'median'], window_sizes=4
     )
-    forecaster = ForecasterRecursiveMultiSeries(
-        LinearRegression(), lags=3, window_features=rolling, transformer_exog=transformer_exog
+    calendar = CalendarFeatures(
+        features=['day_of_week', 'weekend'], encoding="cyclical"
     )
-    forecaster.fit(series=series, exog=exog)
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, window_features=rolling, 
+        calendar_features=calendar, transformer_exog=transformer_exog
+    )
+    forecaster.fit(series=series_dict_dt, exog=exog_wide_dt)
 
-    series_names_in_ = ['1', '2']
+    series_names_in_ = ['l1', 'l2']
     exog_in_ = True
-    exog_type_in_ = type(exog)
+    exog_type_in_ = type(exog_wide_range)
     exog_names_in_ = ['exog_1', 'exog_2']
-    exog_dtypes_in_ = {'exog_1': exog['exog_1'].dtype, 'exog_2': exog['exog_2'].dtype}
+    exog_dtypes_in_ = {
+        'exog_1': np.dtype(float), 
+        'exog_2': np.dtype(object)
+    }
     # All floats
-    exog_dtypes_out_ = {'exog_1': exog['exog_1'].dtype, 'exog_2_a': exog['exog_1'].dtype, 'exog_2_b': exog['exog_1'].dtype}
-    X_train_series_names_in_ = ['1', '2']
+    exog_dtypes_out_ = {
+        'exog_1': np.dtype(float), 
+        'exog_2_a': np.dtype(float), 
+        'exog_2_b': np.dtype(float)
+    }
+    categorical_features_names_in_ = []
+    X_train_series_names_in_ = ['l1', 'l2']
     X_train_window_features_names_out_ = ['roll_ratio_min_max_4', 'roll_median_4']
+    X_train_calendar_features_names_out_ = ['weekend', 'day_of_week_sin', 'day_of_week_cos']
     X_train_exog_names_out_ = ['exog_1', 'exog_2_a', 'exog_2_b']
     X_train_features_names_out_ = [
         'lag_1', 'lag_2', 'lag_3', 'roll_ratio_min_max_4', 'roll_median_4', 
-        '_level_skforecast', 'exog_1', 'exog_2_a', 'exog_2_b'
+        '_level_skforecast', 'exog_1', 'exog_2_a', 'exog_2_b', 
+        'weekend', 'day_of_week_sin', 'day_of_week_cos'
     ]
     
     assert forecaster.series_names_in_ == series_names_in_
@@ -56,6 +157,62 @@ def test_forecaster_series_exog_features_stored():
     assert forecaster.exog_names_in_ == exog_names_in_
     assert forecaster.exog_dtypes_in_ == exog_dtypes_in_
     assert forecaster.exog_dtypes_out_ == exog_dtypes_out_
+    assert forecaster.categorical_features_names_in_ == categorical_features_names_in_
+    assert forecaster.X_train_series_names_in_ == X_train_series_names_in_
+    assert forecaster.X_train_window_features_names_out_ == X_train_window_features_names_out_
+    assert forecaster.X_train_calendar_features_names_out_ == X_train_calendar_features_names_out_
+    assert forecaster.X_train_exog_names_out_ == X_train_exog_names_out_
+    assert forecaster.X_train_features_names_out_ == X_train_features_names_out_
+
+
+def test_forecaster_series_not_matching_exog_features_stored():
+    """
+    Test forecaster stores series and exog features after fitting when exog keys
+    do not match series keys.
+    """
+    exog_dict_no_match = {
+        '1': exog_dict_range['l1'].copy(),
+        '2': exog_dict_range['l2'].copy(),
+    }
+    rolling = RollingFeatures(
+        stats=['ratio_min_max', 'median'], window_sizes=4
+    )
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, window_features=rolling, transformer_exog=transformer_exog
+    )
+
+    warn_msg = re.escape(
+        "No exogenous variables were found in `exog` that match the "
+        "series IDs provided in `series`. As a result, no exogenous "
+        "variables are included in the training matrices. Please "
+        "review the series IDs in `exog` and ensure they match the "
+        "following IDs: ['l1', 'l2']. The forecaster will be "
+        "trained without exogenous variables."
+    )
+    with pytest.warns(MissingExogWarning, match = warn_msg):
+        forecaster.fit(series=series_dict_range, exog=exog_dict_no_match)
+
+    series_names_in_ = ['l1', 'l2']
+    exog_in_ = False
+    exog_type_in_ = None
+    exog_names_in_ = None
+    exog_dtypes_in_ = None
+    exog_dtypes_out_ = None
+    categorical_features_names_in_ = None
+    X_train_series_names_in_ = ['l1', 'l2']
+    X_train_window_features_names_out_ = ['roll_ratio_min_max_4', 'roll_median_4']
+    X_train_exog_names_out_ = None
+    X_train_features_names_out_ = [
+        'lag_1', 'lag_2', 'lag_3', 'roll_ratio_min_max_4', 'roll_median_4', '_level_skforecast'
+    ]
+    
+    assert forecaster.series_names_in_ == series_names_in_
+    assert forecaster.exog_in_ == exog_in_
+    assert forecaster.exog_type_in_ == exog_type_in_
+    assert forecaster.exog_names_in_ == exog_names_in_
+    assert forecaster.exog_dtypes_in_ == exog_dtypes_in_
+    assert forecaster.exog_dtypes_out_ == exog_dtypes_out_
+    assert forecaster.categorical_features_names_in_ == categorical_features_names_in_
     assert forecaster.X_train_series_names_in_ == X_train_series_names_in_
     assert forecaster.X_train_window_features_names_out_ == X_train_window_features_names_out_
     assert forecaster.X_train_exog_names_out_ == X_train_exog_names_out_
@@ -67,16 +224,10 @@ def test_fit_correct_dict_create_series_weights_weight_func_transformer_series()
     Test fit method creates correctly all the auxiliary dicts, series_weights_,
     weight_func_, transformer_series_.
     """
-    series = pd.DataFrame({'l1': pd.Series(np.arange(10)), 
-                           'l2': pd.Series(np.arange(10)), 
-                           'l3': pd.Series(np.arange(10))})
-                    
-    series.index = pd.DatetimeIndex(
-                       ['2022-01-04', '2022-01-05', '2022-01-06', 
-                        '2022-01-07', '2022-01-08', '2022-01-09', 
-                        '2022-01-10', '2022-01-11', '2022-01-12', 
-                        '2022-01-13'], dtype='datetime64[ns]', freq='D' 
-                   )
+    series = pd.DataFrame(
+        {'l1': np.arange(10), 'l2': np.arange(10), 'l3': np.arange(10)},
+        index = pd.date_range('2022-01-04', periods=10, freq='D')
+    ).to_dict(orient='series')
 
     def custom_weights(index):  # pragma: no cover
         """
@@ -95,7 +246,7 @@ def test_fit_correct_dict_create_series_weights_weight_func_transformer_series()
     series_weights = {'l1': 3., 'l3': 0.5, 'l4': 2.}
 
     forecaster = ForecasterRecursiveMultiSeries(
-                     regressor          = LinearRegression(), 
+                     estimator          = LinearRegression(), 
                      lags               = 3,
                      transformer_series = transformer_series,
                      weight_func        = weight_func,
@@ -128,7 +279,10 @@ def test_fit_correct_dict_create_series_weights_weight_func_transformer_series()
         assert forecaster.weight_func_[key].__code__.co_code == expected_weight_func_[key].__code__.co_code
     assert forecaster.series_weights_ == expected_series_weights_
 
-    forecaster.fit(series=series[['l1', 'l2']], store_in_sample_residuals=False)
+    forecaster.fit(
+        series = {k: v for k, v in series.items() if k in ['l1', 'l2']}, 
+        store_in_sample_residuals = False
+    )
 
     expected_transformer_series_ = {
         'l1': forecaster.transformer_series_['l1'], 
@@ -152,18 +306,20 @@ def test_fit_correct_dict_create_series_weights_weight_func_transformer_series()
 
 def test_forecaster_DatetimeIndex_index_freq_stored():
     """
-    Test serie_with_DatetimeIndex.index.freqstr is stored in forecaster.index_freq_.
+    Test serie_with_DatetimeIndex.index.freq is stored in forecaster.index_freq_.
     """
-    series = pd.DataFrame({'1': pd.Series(np.arange(5)), 
-                           '2': pd.Series(np.arange(5))})
-
-    series.index = pd.date_range(start='2022-01-01', periods=5, freq='1D')
+    series = {
+        '1': pd.Series(np.arange(5)), 
+        '2': pd.Series(np.arange(5))
+    }
+    series['1'].index = pd.date_range(start='2022-01-01', periods=5, freq='D')
+    series['2'].index = pd.date_range(start='2022-01-01', periods=5, freq='D')
 
     forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3)
     forecaster.fit(series=series)
     results = forecaster.index_freq_
 
-    expected = series.index.freqstr
+    expected = series['1'].index.freq
 
     assert results == expected
 
@@ -172,14 +328,16 @@ def test_forecaster_index_step_stored():
     """
     Test serie without DatetimeIndex, step is stored in forecaster.index_freq_.
     """
-    series = pd.DataFrame({'1': pd.Series(np.arange(5)), 
-                           '2': pd.Series(np.arange(5))})
+    series = {
+        '1': pd.Series(np.arange(5)), 
+        '2': pd.Series(np.arange(5))
+    }
     
     forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3)
     forecaster.fit(series=series)
     results = forecaster.index_freq_
 
-    expected = series.index.step
+    expected = series['1'].index.step
 
     assert results == expected
 
@@ -192,8 +350,10 @@ def test_fit_in_sample_residuals_stored(encoding):
     Test that values of in_sample_residuals_ are stored after fitting
     when `store_in_sample_residuals=True`.
     """
-    series = pd.DataFrame({'1': pd.Series(np.arange(5)), 
-                           '2': pd.Series(np.arange(5))})
+    series = {
+        '1': pd.Series(np.arange(5)), 
+        '2': pd.Series(np.arange(5))
+    }
 
     rolling = RollingFeatures(
         stats=['ratio_min_max', 'median'], window_sizes=4
@@ -204,9 +364,11 @@ def test_fit_in_sample_residuals_stored(encoding):
     forecaster.fit(series=series, store_in_sample_residuals=True)
     results = forecaster.in_sample_residuals_
 
-    expected = {'1': np.array([-4.4408921e-16, 0.0000000e+00]),
-                '2': np.array([0., 0.]),
-                '_unknown_level': np.array([-4.4408921e-16, 0.0000000e+00, 0., 0.])}
+    expected = {
+        '1': np.array([-4.4408921e-16, 0.0000000e+00]),
+        '2': np.array([0., 0.]),
+        '_unknown_level': np.array([-4.4408921e-16, 0.0000000e+00, 0., 0.])
+    }
     
     X_train_window_features_names_out_ = ['roll_ratio_min_max_4', 'roll_median_4']
     X_train_features_names_out_ = (
@@ -234,7 +396,10 @@ def test_fit_in_sample_residuals_by_bin_stored(encoding):
     when `store_in_sample_residuals=True`.
     """
     rng = np.random.default_rng(1894)
-    series = pd.DataFrame({"1": rng.normal(10, 5, 20), "2": rng.normal(10, 5, 20)})
+    series = {
+        "1": pd.Series(rng.normal(10, 5, 20)), 
+        "2": pd.Series(rng.normal(10, 5, 20))
+    }
 
     rolling = RollingFeatures(stats=["ratio_min_max", "median"], window_sizes=4)
     forecaster = ForecasterRecursiveMultiSeries(
@@ -393,7 +558,7 @@ def test_fit_same_residuals_when_residuals_greater_than_10_000(encoding):
     series = pd.DataFrame(
         {"1": rng.normal(10, 1, 15_000), "2": rng.normal(10, 1, 15_000)},
         index=pd.date_range(start="2000-01-01", periods=15_000, freq="h"),
-    )
+    ).to_dict(orient='series')
 
     forecaster = ForecasterRecursiveMultiSeries(
         LinearRegression(), lags=3, encoding=encoding
@@ -426,7 +591,7 @@ def test_fit_same_residuals_by_bin_when_residuals_greater_than_10_000(encoding):
     series = pd.DataFrame(
         {"1": rng.normal(10, 1, 15_000), "2": rng.normal(10, 1, 15_000)},
         index=pd.date_range(start="2000-01-01", periods=15_000, freq="h"),
-    )
+    ).to_dict(orient='series')
 
     forecaster_1 = ForecasterRecursiveMultiSeries(
         LinearRegression(), lags=3, encoding=encoding, binner_kwargs={"n_bins": 3}
@@ -462,7 +627,10 @@ def test_fit_in_sample_residuals_not_stored_probabilistic_mode_binned(encoding):
     when `store_in_sample_residuals=False`. Binner intervals are stored.
     """
     rng = np.random.default_rng(1894)
-    series = pd.DataFrame({"1": rng.normal(10, 5, 20), "2": rng.normal(10, 5, 20)})
+    series = {
+        "1": pd.Series(rng.normal(10, 5, 20)), 
+        "2": pd.Series(rng.normal(10, 5, 20))
+    }
 
     rolling = RollingFeatures(stats=["ratio_min_max", "median"], window_sizes=4)
     forecaster = ForecasterRecursiveMultiSeries(
@@ -533,7 +701,10 @@ def test_fit_in_sample_residuals_not_stored_probabilistic_mode_False(encoding):
     when `store_in_sample_residuals=False` and _probabilistic_mode=False.
     """
     rng = np.random.default_rng(1894)
-    series = pd.DataFrame({"1": rng.normal(10, 5, 20), "2": rng.normal(10, 5, 20)})
+    series = {
+        "1": pd.Series(rng.normal(10, 5, 20)), 
+        "2": pd.Series(rng.normal(10, 5, 20))
+    }
 
     forecaster = ForecasterRecursiveMultiSeries(
         LinearRegression(), lags=3, encoding=encoding
@@ -572,8 +743,10 @@ def test_fit_last_window_stored():
     """
     Test that values of last window are stored after fitting.
     """
-    series = pd.DataFrame({'1': pd.Series(np.arange(5, dtype=float)), 
-                           '2': pd.Series(np.arange(5, dtype=float))})
+    series = {
+        '1': pd.Series(np.arange(5, dtype=float)), 
+        '2': pd.Series(np.arange(5, dtype=float))
+    }
 
     forecaster = ForecasterRecursiveMultiSeries(LinearRegression(), lags=3)
     forecaster.fit(series=series)
@@ -607,8 +780,10 @@ def test_fit_encoding_mapping(encoding, encoding_mapping_):
     """
     Test the encoding mapping of _create_train_X_y.
     """
-    series = pd.DataFrame({'1': pd.Series(np.arange(7, dtype=float)), 
-                           '2': pd.Series(np.arange(7, dtype=float))})
+    series = {
+        '1': pd.Series(np.arange(7, dtype=float)), 
+        '2': pd.Series(np.arange(7, dtype=float))
+    }
     
     forecaster = ForecasterRecursiveMultiSeries(
                      LinearRegression(),
@@ -618,3 +793,191 @@ def test_fit_encoding_mapping(encoding, encoding_mapping_):
     forecaster.fit(series=series, suppress_warnings=True)
     
     assert forecaster.encoding_mapping_ == encoding_mapping_
+
+
+def test_fit_resets_out_sample_residuals_on_refit():
+    """
+    Test that out_sample_residuals_ and out_sample_residuals_by_bin_ are reset
+    to None when the forecaster is refitted.
+    """
+    series = {
+        '1': pd.Series(np.arange(50, dtype=float)),
+        '2': pd.Series(np.arange(50, dtype=float)),
+    }
+    forecaster = ForecasterRecursiveMultiSeries(
+        LinearRegression(), lags=3, encoding='ordinal'
+    )
+    forecaster.fit(series=series, suppress_warnings=True)
+    forecaster.set_out_sample_residuals(
+        y_true={'1': np.arange(1, 48, dtype=float), '2': np.arange(1, 48, dtype=float)},
+        y_pred={'1': np.zeros(47), '2': np.zeros(47)},
+    )
+
+    assert forecaster.out_sample_residuals_ is not None
+    assert forecaster.out_sample_residuals_by_bin_ is not None
+
+    forecaster.fit(series=series, suppress_warnings=True)
+
+    assert forecaster.out_sample_residuals_ is None
+    assert forecaster.out_sample_residuals_by_bin_ is None
+
+
+# ==============================================================================
+# Tests: fit with categorical features and configure_estimator_categorical_features
+# ==============================================================================
+@pytest.mark.parametrize(
+    "estimator, check_fn",
+    [
+        (
+            CatBoostRegressor(
+                iterations=10, random_seed=123, verbose=0,
+                allow_writing_files=False
+            ),
+            None
+        ),
+        (
+            LGBMRegressor(verbose=-1, random_state=123),
+            None
+        ),
+        (
+            XGBRegressor(random_state=123),
+            lambda est, cat_idx, n_features: (
+                est.get_params()['enable_categorical'] is True
+                and est.get_params()['feature_types'] == [
+                    'c' if i in cat_idx else 'q' for i in range(n_features)
+                ]
+            )
+        ),
+        (
+            HistGradientBoostingRegressor(random_state=123),
+            lambda est, cat_idx, n_features: (
+                est.get_params()['categorical_features'] == cat_idx
+            )
+        ),
+    ],
+    ids=['CatBoostRegressor', 'LGBMRegressor', 'XGBRegressor', 'HistGradientBoostingRegressor']
+)
+def test_fit_configures_estimator_categorical_features(estimator, check_fn):
+    """
+    Test that fit correctly configures native categorical feature support
+    for each supported estimator (CatBoostRegressor, LGBMRegressor,
+    XGBRegressor, HistGradientBoostingRegressor).
+    """
+    series = {
+        'l1': pd.Series(np.arange(20, dtype=float)),
+        'l2': pd.Series(np.arange(20, dtype=float))
+    }
+    exog = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float),
+        'exog_cat': pd.Categorical(range(20))
+    })
+
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=estimator, lags=3, encoding='ordinal_category',
+        transformer_series=None, categorical_features='auto'
+    )
+    forecaster.fit(series=series, exog=exog, suppress_warnings=True)
+
+    assert forecaster.is_fitted
+    assert forecaster.categorical_features_names_in_ == ['exog_cat']
+    assert 'exog_cat' in forecaster.X_train_features_names_out_
+
+    if check_fn is not None:
+        # With ordinal_category, _level_skforecast is also treated as categorical
+        cat_idx = [
+            forecaster.X_train_features_names_out_.index('exog_cat'),
+            forecaster.X_train_features_names_out_.index('_level_skforecast')
+        ]
+        n_features = len(forecaster.X_train_features_names_out_)
+        assert check_fn(forecaster.estimator, cat_idx, n_features)
+
+    # fit_kwargs must not be mutated
+    assert forecaster.fit_kwargs == {}
+
+
+@pytest.mark.parametrize(
+    "estimator, param_name, default_value",
+    [
+        (
+            XGBRegressor(random_state=123),
+            'feature_types',
+            None
+        ),
+        (
+            HistGradientBoostingRegressor(random_state=123),
+            'categorical_features',
+            'from_dtype'
+        ),
+    ],
+    ids=['XGBRegressor', 'HistGradientBoostingRegressor']
+)
+def test_fit_resets_estimator_categorical_params_on_refit_without_categoricals(
+    estimator, param_name, default_value
+):
+    """
+    Test that fitting with categorical features and then refitting without
+    categoricals resets the estimator's categorical parameters to their
+    default values (XGBoost: feature_types=None,
+    HistGradientBoosting: categorical_features='from_dtype').
+    """
+    series = {
+        'l1': pd.Series(np.arange(20, dtype=float)),
+        'l2': pd.Series(np.arange(20, dtype=float))
+    }
+    exog_with_cat = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float),
+        'exog_cat': pd.Categorical(['a', 'b'] * 10)
+    })
+    exog_no_cat = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float)
+    })
+
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=estimator, lags=3, encoding='ordinal',
+        transformer_series=None, categorical_features='auto'
+    )
+
+    # First fit — with categoricals
+    forecaster.fit(series=series, exog=exog_with_cat, suppress_warnings=True)
+    assert forecaster.categorical_features_names_in_ == ['exog_cat']
+
+    # Second fit — without categoricals (auto detects no categories → [])
+    forecaster.fit(series=series, exog=exog_no_cat, suppress_warnings=True)
+    assert forecaster.categorical_features_names_in_ == []
+    assert forecaster.estimator.get_params()[param_name] == default_value
+
+
+@pytest.mark.parametrize(
+    "estimator",
+    [
+        CatBoostRegressor(
+            iterations=10, random_seed=123, verbose=0,
+            allow_writing_files=False
+        ),
+        LGBMRegressor(verbose=-1, random_state=123),
+        XGBRegressor(random_state=123),
+        HistGradientBoostingRegressor(random_state=123),
+    ],
+    ids=['CatBoostRegressor', 'LGBMRegressor', 'XGBRegressor', 'HistGradientBoostingRegressor']
+)
+def test_fit_no_categoricals_with_supported_estimators(estimator):
+    """
+    Test that fit works correctly with supported estimators when
+    categorical_features=None (no categorical encoding).
+    """
+    series = {
+        'l1': pd.Series(np.arange(20, dtype=float)),
+        'l2': pd.Series(np.arange(20, dtype=float))
+    }
+    exog = pd.DataFrame({
+        'exog_num': np.arange(100, 120, dtype=float)
+    })
+
+    forecaster = ForecasterRecursiveMultiSeries(
+        estimator=estimator, lags=3, encoding='ordinal',
+        transformer_series=None, categorical_features=None
+    )
+    forecaster.fit(series=series, exog=exog, suppress_warnings=True)
+
+    assert forecaster.is_fitted
+    assert forecaster.categorical_features_names_in_ is None

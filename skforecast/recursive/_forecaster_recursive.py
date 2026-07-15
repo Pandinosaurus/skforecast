@@ -12,18 +12,23 @@ import sys
 import numpy as np
 import pandas as pd
 import inspect
-from copy import copy, deepcopy
+from copy import copy
+from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 from sklearn.pipeline import Pipeline
-from sklearn.base import clone
+from sklearn.preprocessing import OrdinalEncoder
 
-import skforecast
+from .. import __version__
 from ..base import ForecasterBase
-from ..exceptions import DataTransformationWarning, ResidualsUsageWarning
+from ..exceptions import (
+    DataTransformationWarning, 
+    MissingValuesWarning, 
+    ResidualsUsageWarning
+)
 from ..utils import (
     initialize_lags,
     initialize_window_features,
-    initialize_weights,
+    initialize_weights,    
     check_select_fit_kwargs,
     check_y,
     check_exog,
@@ -32,29 +37,33 @@ from ..utils import (
     check_predict_input,
     check_residuals_input,
     check_interval,
-    preprocess_y,
-    preprocess_last_window,
-    preprocess_exog,
+    _normalize_interval_scale,
+    check_extract_values_and_index,
+    configure_estimator_categorical_features,
+    cast_catboost_categorical_columns,
     input_to_frame,
     date_to_index_position,
     expand_index,
     transform_numpy,
     transform_dataframe,
     get_style_repr_html,
-    set_cpu_gpu_device
+    set_cpu_gpu_device,
+    _build_predict_function,
+    manage_warnings,
+    scale_correction_factor_differentiation
 )
 from ..preprocessing import TimeSeriesDifferentiator, QuantileBinner
 
 
 class ForecasterRecursive(ForecasterBase):
     """
-    This class turns any regressor compatible with the scikit-learn API into a
+    This class turns any estimator compatible with the scikit-learn API into a
     recursive autoregressive (multi-step) forecaster.
     
     Parameters
     ----------
-    regressor : regressor or pipeline compatible with the scikit-learn API
-        An instance of a regressor or pipeline compatible with the scikit-learn API.
+    estimator : estimator or pipeline compatible with the scikit-learn API
+        An instance of an estimator or pipeline compatible with the scikit-learn API.
     lags : int, list, numpy ndarray, range, default None
         Lags used as predictors. Index starts at 1, so lag 1 is equal to t-1.
     
@@ -65,6 +74,14 @@ class ForecasterRecursive(ForecasterBase):
     window_features : object, list, default None
         Instance or list of instances used to create window features. Window features
         are created from the original time series and are included as predictors.
+        Skforecast provides the `RollingFeatures` class, but a custom object can
+        also be passed as long as it implements the required interface.
+    calendar_features : object, default None
+        Instance of `CalendarFeatures` used to create calendar features from the
+        datetime index. Calendar features are included as predictors and are
+        generated automatically during both training and prediction. Only supported 
+        when the index of the input data is a `pandas.DatetimeIndex`.
+        **New in version 0.23.0**
     transformer_y : object transformer (preprocessor), default None
         An instance of a transformer (preprocessor) compatible with the scikit-learn
         preprocessing API with methods: fit, transform, fit_transform and inverse_transform.
@@ -74,10 +91,20 @@ class ForecasterRecursive(ForecasterBase):
         An instance of a transformer (preprocessor) compatible with the scikit-learn
         preprocessing API. The transformation is applied to `exog` before training the
         forecaster. `inverse_transform` is not available when using ColumnTransformers.
+    categorical_features : str, list, default 'auto'
+        Specifies which exogenous variables should be treated as categorical
+        features. Categorical features are encoded using an `OrdinalEncoder`
+        internally managed by the forecaster.
+
+        - If `'auto'`: after applying `transformer_exog`, any column with a
+        non-numeric dtype is treated as categorical.
+        - If `list`: a list of column names to be treated as categorical.
+        - If `None`: no categorical encoding is applied internally.
+        **New in version 0.22.0**
     weight_func : Callable, default None
         Function that defines the individual weights for each sample based on the
         index. For example, a function that assigns a lower weight to certain dates.
-        Ignored if `regressor` does not have the argument `sample_weight` in its `fit`
+        Ignored if `estimator` does not have the argument `sample_weight` in its `fit`
         method. The resulting `sample_weight` cannot have negative values.
     differentiation : int, default None
         Order of differencing applied to the time series before training the forecaster.
@@ -85,8 +112,14 @@ class ForecasterRecursive(ForecasterBase):
         of times the differencing operation is applied to a time series. Differencing
         involves computing the differences between consecutive data points in the series.
         Before returning a prediction, the differencing operation is reversed.
+    dropna_from_series : bool, default False
+        Determine whether NaN detected in the training matrices will be dropped.
+        Relevant when `y` or `exog` contain interspersed NaN values.
+
+        - If `True`, drop NaNs in `X_train` and same rows in `y_train`.
+        - If `False`, leave NaNs in `X_train` and warn the user.
     fit_kwargs : dict, default None
-        Additional arguments to be passed to the `fit` method of the regressor.
+        Additional arguments to be passed to the `fit` method of the estimator.
     binner_kwargs : dict, default None
         Additional arguments to pass to the `QuantileBinner` used to discretize 
         the residuals into k bins according to the predicted values associated 
@@ -99,8 +132,8 @@ class ForecasterRecursive(ForecasterBase):
     
     Attributes
     ----------
-    regressor : regressor or pipeline compatible with the scikit-learn API
-        An instance of a regressor or pipeline compatible with the scikit-learn API.
+    estimator : estimator or pipeline compatible with the scikit-learn API
+        An instance of an estimator or pipeline compatible with the scikit-learn API.
     lags : numpy ndarray
         Lags used as predictors.
     lags_names : list
@@ -115,6 +148,12 @@ class ForecasterRecursive(ForecasterBase):
         Names of the classes used to create the window features.
     max_size_window_features : int
         Maximum window size required by the window features.
+    calendar_features : object
+        Instance of `CalendarFeatures` used to create calendar features from the
+        datetime index.
+    calendar_features_names : list
+        Names of the calendar features to extract, taken from the `features`
+        attribute of the `calendar_features` object.
     window_size : int
         The window size needed to create the predictors. It is calculated as the 
         maximum value between `max_lag` and `max_size_window_features`. If 
@@ -132,7 +171,7 @@ class ForecasterRecursive(ForecasterBase):
     weight_func : Callable
         Function that defines the individual weights for each sample based on the
         index. For example, a function that assigns a lower weight to certain dates.
-        Ignored if `regressor` does not have the argument `sample_weight` in its `fit`
+        Ignored if `estimator` does not have the argument `sample_weight` in its `fit`
         method. The resulting `sample_weight` cannot have negative values.
     source_code_weight_func : str
         Source code of the custom function used to create weights.
@@ -144,6 +183,8 @@ class ForecasterRecursive(ForecasterBase):
         the value of the `differentiation` parameter.
     differentiator : TimeSeriesDifferentiator
         Skforecast object used to differentiate the time series.
+    dropna_from_series : bool
+        Determine whether NaN detected in the training matrices will be dropped.
     last_window_ : pandas DataFrame
         This window represents the most recent data observed by the predictor
         during its training phase. It contains the values needed to predict the
@@ -160,7 +201,7 @@ class ForecasterRecursive(ForecasterBase):
     training_range_ : pandas Index
         First and last values of index of the data used during training.
     series_name_in_ : str
-        Names of the series provided by the user during training.
+        Name of the series provided by the user during training.
     exog_in_ : bool
         If the forecaster has been trained using exogenous variable/s.
     exog_names_in_ : list
@@ -178,21 +219,31 @@ class ForecasterRecursive(ForecasterBase):
     X_train_window_features_names_out_ : list
         Names of the window features included in the matrix `X_train` created
         internally for training.
+    X_train_calendar_features_names_out_ : list
+        Names of the calendar features included in the matrix `X_train` created
+        internally for training.
     X_train_exog_names_out_ : list
         Names of the exogenous variables included in the matrix `X_train` created
         internally for training. It can be different from `exog_names_in_` if
         some exogenous variables are transformed during the training process.
     X_train_features_names_out_ : list
         Names of columns of the matrix created internally for training.
+    categorical_features : str, list
+        How categorical features are identified among the exogenous variables. It 
+        can be 'auto', a list of column names or `None`.
+    categorical_features_names_in_ : list
+        Names of the exogenous variables considered as categorical.
+    categorical_encoder : sklearn OrdinalEncoder
+        `OrdinalEncoder` used internally to encode categorical features.
     fit_kwargs : dict
-        Additional arguments to be passed to the `fit` method of the regressor.
+        Additional arguments to be passed to the `fit` method of the estimator.
     in_sample_residuals_ : numpy ndarray
         Residuals of the model when predicting training data. Only stored up to
         10_000 values. If `transformer_y` is not `None`, residuals are stored in
         the transformed scale. If `differentiation` is not `None`, residuals are
         stored after differentiation.
     in_sample_residuals_by_bin_ : dict
-        In sample residuals binned according to the predicted value each residual
+        In-sample residuals binned according to the predicted value each residual
         is associated with. The number of residuals stored per bin is limited to 
         `10_000 // self.binner.n_bins_` in the form `{bin: residuals}`. If 
         `transformer_y` is not `None`, residuals are stored in the transformed 
@@ -222,7 +273,7 @@ class ForecasterRecursive(ForecasterBase):
     creation_date : str
         Date of creation.
     is_fitted : bool
-        Tag to identify if the regressor has been fitted (trained).
+        Tag to identify if the estimator has been fitted (trained).
     fit_date : str
         Date of last fit.
     skforecast_version : str
@@ -231,6 +282,8 @@ class ForecasterRecursive(ForecasterBase):
         Version of python used to create the forecaster.
     forecaster_id : str, int
         Name used as an identifier of the forecaster.
+    __skforecast_tags__ : dict
+        Tags associated with the forecaster.
     _probabilistic_mode: str, bool
         Private attribute used to indicate whether the forecaster should perform 
         some calculations during backtesting.
@@ -239,52 +292,67 @@ class ForecasterRecursive(ForecasterBase):
 
     def __init__(
         self,
-        regressor: object,
+        estimator: object,
         lags: int | list[int] | np.ndarray[int] | range[int] | None = None,
         window_features: object | list[object] | None = None,
+        calendar_features: object | None = None,
         transformer_y: object | None = None,
         transformer_exog: object | None = None,
+        categorical_features: str | list[str] | None = 'auto',
         weight_func: Callable | None = None,
         differentiation: int | None = None,
+        dropna_from_series: bool = False,
         fit_kwargs: dict[str, object] | None = None,
         binner_kwargs: dict[str, object] | None = None,
         forecaster_id: str | int | None = None
     ) -> None:
         
-        self.regressor                          = copy(regressor)
-        self.transformer_y                      = transformer_y
-        self.transformer_exog                   = transformer_exog
-        self.weight_func                        = weight_func
-        self.source_code_weight_func            = None
-        self.differentiation                    = differentiation
-        self.differentiation_max                = None
-        self.differentiator                     = None
-        self.last_window_                       = None
-        self.index_type_                        = None
-        self.index_freq_                        = None
-        self.training_range_                    = None
-        self.series_name_in_                    = None
-        self.exog_in_                           = False
-        self.exog_names_in_                     = None
-        self.exog_type_in_                      = None
-        self.exog_dtypes_in_                    = None
-        self.exog_dtypes_out_                   = None
-        self.X_train_window_features_names_out_ = None
-        self.X_train_exog_names_out_            = None
-        self.X_train_features_names_out_        = None
-        self.in_sample_residuals_               = None
-        self.out_sample_residuals_              = None
-        self.in_sample_residuals_by_bin_        = None
-        self.out_sample_residuals_by_bin_       = None
-        self.creation_date                      = pd.Timestamp.today().strftime('%Y-%m-%d %H:%M:%S')
-        self.is_fitted                          = False
-        self.fit_date                           = None
-        self.skforecast_version                 = skforecast.__version__
-        self.python_version                     = sys.version.split(" ")[0]
-        self.forecaster_id                      = forecaster_id
-        self._probabilistic_mode                = "binned"
+        self.estimator                            = clone(estimator)
+        self.calendar_features                    = (
+            clone(calendar_features) if calendar_features is not None else None
+        )
+        self.calendar_features_names              = getattr(calendar_features, 'features', None)
+        self.transformer_y                        = transformer_y
+        self.transformer_exog                     = transformer_exog
+        self.categorical_features                 = categorical_features
+        self.weight_func                          = weight_func
+        self.source_code_weight_func              = None
+        self.differentiation                      = differentiation
+        self.differentiation_max                  = None
+        self.differentiator                       = None
+        self.dropna_from_series                   = dropna_from_series
+        self.last_window_                         = None
+        self.index_type_                          = None
+        self.index_freq_                          = None
+        self.training_range_                      = None
+        self.series_name_in_                      = None
+        self.exog_in_                             = False
+        self.exog_names_in_                       = None
+        self.exog_type_in_                        = None
+        self.exog_dtypes_in_                      = None
+        self.exog_dtypes_out_                     = None
+        self.categorical_features_names_in_       = None
+        self.X_train_window_features_names_out_   = None
+        self.X_train_calendar_features_names_out_ = None
+        self.X_train_exog_names_out_              = None
+        self.X_train_features_names_out_          = None
+        self.in_sample_residuals_                 = None
+        self.out_sample_residuals_                = None
+        self.in_sample_residuals_by_bin_          = None
+        self.out_sample_residuals_by_bin_         = None
+        self.creation_date                        = pd.Timestamp.today().strftime('%Y-%m-%d %H:%M:%S')
+        self.is_fitted                            = False
+        self.fit_date                             = None
+        self.skforecast_version                   = __version__
+        self.python_version                       = sys.version.split(" ")[0]
+        self.forecaster_id                        = forecaster_id
+        self._probabilistic_mode                  = "binned"
 
         self.lags, self.lags_names, self.max_lag = initialize_lags(type(self).__name__, lags)
+        self.lags_are_contiguous = (
+            self.lags is not None
+            and np.array_equal(self.lags, np.arange(1, self.max_lag + 1))
+        )
         self.window_features, self.window_features_names, self.max_size_window_features = (
             initialize_window_features(window_features)
         )
@@ -305,9 +373,32 @@ class ForecasterRecursive(ForecasterBase):
                 type(wf).__name__ for wf in self.window_features
             ]
 
+        if categorical_features is not None:
+            if not (
+                (isinstance(categorical_features, str) and categorical_features == 'auto')
+                or isinstance(categorical_features, list)
+            ):
+                raise ValueError(
+                    f"Argument `categorical_features` must be `'auto'`, a list of "
+                    f"column names, or `None`. Got {categorical_features}."
+                )
+            if isinstance(categorical_features, list):
+                if len(categorical_features) == 0:
+                    raise ValueError(
+                        "Argument `categorical_features` must not be an empty list. "
+                        "Use `None` to disable categorical encoding."
+                    )
+
+        self.categorical_encoder = OrdinalEncoder(
+                                       dtype                 = float,
+                                       handle_unknown        = 'use_encoded_value',
+                                       unknown_value         = np.nan,
+                                       encoded_missing_value = np.nan
+                                   ).set_output(transform="pandas")
+
         self.weight_func, self.source_code_weight_func, _ = initialize_weights(
             forecaster_name = type(self).__name__, 
-            regressor       = regressor, 
+            estimator       = estimator, 
             weight_func     = weight_func, 
             series_weights  = None
         )
@@ -326,7 +417,7 @@ class ForecasterRecursive(ForecasterBase):
             )
 
         self.fit_kwargs = check_select_fit_kwargs(
-                              regressor  = regressor,
+                              estimator  = estimator,
                               fit_kwargs = fit_kwargs
                           )
 
@@ -338,6 +429,37 @@ class ForecasterRecursive(ForecasterBase):
             }
         self.binner = QuantileBinner(**self.binner_kwargs)
         self.binner_intervals_ = None
+        
+        self.__skforecast_tags__ = {
+            "library": "skforecast",
+            "forecaster_name": "ForecasterRecursive",
+            "forecaster_task": "regression",
+            "forecasting_scope": "single-series",  # single-series | global
+            "forecasting_strategy": "recursive",  # recursive | direct | deep_learning | foundation
+            "multiple_estimators": False, 
+            "index_types_supported": ["pandas.RangeIndex", "pandas.DatetimeIndex"],
+            "requires_index_frequency": True,
+
+            "allowed_input_types_series": ["pandas.Series"],
+            "supports_exog": True,
+            "allowed_input_types_exog": ["pandas.Series", "pandas.DataFrame"],
+            "handles_missing_values_series": True, 
+            "handles_missing_values_exog": True, 
+
+            "supports_lags": True,
+            "supports_window_features": True,
+            "supports_calendar_features": True,
+            "supports_transformer_series": True,
+            "supports_transformer_exog": True,
+            "supports_categorical_features": True,
+            "supports_weight_func": True,
+            "supports_differentiation": True,
+
+            "prediction_types": ["point", "interval", "bootstrapping", "quantiles", "distribution"],
+            "supports_probabilistic": True,
+            "probabilistic_methods": ["bootstrapping", "conformal"],
+            "handles_binned_residuals": True
+        }
 
     def __repr__(
         self
@@ -353,7 +475,7 @@ class ForecasterRecursive(ForecasterBase):
             exog_names_in_,
             _,
         ) = self._preprocess_repr(
-                regressor      = self.regressor,
+                estimator      = self.estimator,
                 exog_names_in_ = self.exog_names_in_
             )
         
@@ -364,21 +486,24 @@ class ForecasterRecursive(ForecasterBase):
             f"{'=' * len(type(self).__name__)} \n"
             f"{type(self).__name__} \n"
             f"{'=' * len(type(self).__name__)} \n"
-            f"Regressor: {type(self.regressor).__name__} \n"
+            f"Estimator: {type(self.estimator).__name__} \n"
             f"Lags: {self.lags} \n"
             f"Window features: {self.window_features_names} \n"
+            f"Calendar features: {self.calendar_features_names} \n"
             f"Window size: {self.window_size} \n"
             f"Series name: {self.series_name_in_} \n"
             f"Exogenous included: {self.exog_in_} \n"
             f"Exogenous names: {exog_names_in_} \n"
+            f"Categorical features: {self.categorical_features} \n"
             f"Transformer for y: {self.transformer_y} \n"
             f"Transformer for exog: {self.transformer_exog} \n"
             f"Weight function included: {True if self.weight_func is not None else False} \n"
             f"Differentiation order: {self.differentiation} \n"
+            f"Drop NaN from series: {self.dropna_from_series} \n"
             f"Training range: {self.training_range_.to_list() if self.is_fitted else None} \n"
             f"Training index type: {str(self.index_type_).split('.')[-1][:-2] if self.is_fitted else None} \n"
             f"Training index frequency: {self.index_freq_ if self.is_fitted else None} \n"
-            f"Regressor parameters: {params} \n"
+            f"Estimator parameters: {params} \n"
             f"fit_kwargs: {self.fit_kwargs} \n"
             f"Creation date: {self.creation_date} \n"
             f"Last fit date: {self.fit_date} \n"
@@ -389,7 +514,7 @@ class ForecasterRecursive(ForecasterBase):
 
         return info
 
-    def _repr_html_(self):
+    def _repr_html_(self) -> str:
         """
         HTML representation of the object.
         The "General Information" section is expanded by default.
@@ -402,26 +527,31 @@ class ForecasterRecursive(ForecasterBase):
             exog_names_in_,
             _,
         ) = self._preprocess_repr(
-                regressor      = self.regressor,
-                exog_names_in_ = self.exog_names_in_
+                estimator                       = self.estimator,
+                exog_names_in_                  = self.exog_names_in_,
+                categorical_features_names_in_  = self.categorical_features_names_in_,
+                as_html                         = True,
             )
 
         style, unique_id = get_style_repr_html(self.is_fitted)
-        
+
         content = f"""
         <div class="container-{unique_id}">
-            <h2>{type(self).__name__}</h2>
+            <p style="font-size: 1.5em; font-weight: bold; margin-block-start: 0.83em; margin-block-end: 0.83em;">{type(self).__name__}</p>
             <details open>
                 <summary>General Information</summary>
                 <ul>
-                    <li><strong>Regressor:</strong> {type(self.regressor).__name__}</li>
+                    <li><strong>Estimator:</strong> {type(self.estimator).__name__}</li>
                     <li><strong>Lags:</strong> {self.lags}</li>
                     <li><strong>Window features:</strong> {self.window_features_names}</li>
+                    <li><strong>Calendar features:</strong> {self.calendar_features_names}</li>
                     <li><strong>Window size:</strong> {self.window_size}</li>
                     <li><strong>Series name:</strong> {self.series_name_in_}</li>
                     <li><strong>Exogenous included:</strong> {self.exog_in_}</li>
+                    <li><strong>Categorical features:</strong> {self.categorical_features}</li>
                     <li><strong>Weight function included:</strong> {self.weight_func is not None}</li>
                     <li><strong>Differentiation order:</strong> {self.differentiation}</li>
+                    <li><strong>Drop NaN from series:</strong> {self.dropna_from_series}</li>
                     <li><strong>Creation date:</strong> {self.creation_date}</li>
                     <li><strong>Last fit date:</strong> {self.fit_date}</li>
                     <li><strong>Skforecast version:</strong> {self.skforecast_version}</li>
@@ -431,9 +561,7 @@ class ForecasterRecursive(ForecasterBase):
             </details>
             <details>
                 <summary>Exogenous Variables</summary>
-                <ul>
-                    {exog_names_in_}
-                </ul>
+                <p style="margin: 0.2em 0 0.2em 1.5em;">{exog_names_in_}</p>
             </details>
             <details>
                 <summary>Data Transformations</summary>
@@ -447,11 +575,11 @@ class ForecasterRecursive(ForecasterBase):
                 <ul>
                     <li><strong>Training range:</strong> {self.training_range_.to_list() if self.is_fitted else 'Not fitted'}</li>
                     <li><strong>Training index type:</strong> {str(self.index_type_).split('.')[-1][:-2] if self.is_fitted else 'Not fitted'}</li>
-                    <li><strong>Training index frequency:</strong> {self.index_freq_ if self.is_fitted else 'Not fitted'}</li>
+                    <li><strong>Training index frequency:</strong> {self.index_freq_.freqstr if hasattr(self.index_freq_, 'freqstr') else str(self.index_freq_) if self.is_fitted else 'Not fitted'}</li>
                 </ul>
             </details>
             <details>
-                <summary>Regressor Parameters</summary>
+                <summary>Estimator Parameters</summary>
                 <ul>
                     {params}
                 </ul>
@@ -463,15 +591,14 @@ class ForecasterRecursive(ForecasterBase):
                 </ul>
             </details>
             <p>
-                <a href="https://skforecast.org/{skforecast.__version__}/api/forecasterrecursive.html">&#128712 <strong>API Reference</strong></a>
+                <a href="https://skforecast.org/{__version__}/api/forecasterrecursive.html">&#128214; <strong>API Reference</strong></a>
                 &nbsp;&nbsp;
-                <a href="https://skforecast.org/{skforecast.__version__}/user_guides/autoregresive-forecaster.html">&#128462 <strong>User Guide</strong></a>
+                <a href="https://skforecast.org/{__version__}/user_guides/autoregressive-forecaster.html">&#128221; <strong>User Guide</strong></a>
             </p>
         </div>
         """
 
         return style + content
-
 
     def _create_lags(
         self,
@@ -483,7 +610,7 @@ class ForecasterRecursive(ForecasterBase):
         Create the lagged values and their target variable from a time series.
         
         Note that the returned matrix `X_data` contains the lag 1 in the first 
-        column, the lag 2 in the in the second column and so on.
+        column, the lag 2 in the second column and so on.
         
         Parameters
         ----------
@@ -502,16 +629,22 @@ class ForecasterRecursive(ForecasterBase):
         y_data : numpy ndarray
             Values of the time series related to each row of `X_data`.
         
-        """
+        Notes
+        -----
+        Returned matrices may be views into the original `y` so care must be taken
+        when modifying them.
 
+        """
+        
         X_data = None
         if self.lags is not None:
-            n_rows = len(y) - self.window_size
-            X_data = np.full(
-                shape=(n_rows, len(self.lags)), fill_value=np.nan, order='F', dtype=float
-            )
-            for i, lag in enumerate(self.lags):
-                X_data[:, i] = y[self.window_size - lag: -lag]
+            y_strided = np.lib.stride_tricks.sliding_window_view(y, self.window_size)[:-1]
+            if self.lags_are_contiguous:
+                # Basic slice → view (no copy); reversed to put lag_1 first.
+                X_data = y_strided[:, self.window_size - self.max_lag:][:, ::-1]
+            else:
+                # Non-contiguous lags require fancy indexing, which forces a copy.
+                X_data = y_strided[:, self.window_size - self.lags]
 
             if X_as_pandas:
                 X_data = pd.DataFrame(
@@ -524,7 +657,6 @@ class ForecasterRecursive(ForecasterBase):
 
         return X_data, y_data
 
-
     def _create_window_features(
         self, 
         y: pd.Series,
@@ -532,6 +664,7 @@ class ForecasterRecursive(ForecasterBase):
         X_as_pandas: bool = False,
     ) -> tuple[list[np.ndarray | pd.DataFrame], list[str]]:
         """
+        Create window features from a time series.
         
         Parameters
         ----------
@@ -570,7 +703,7 @@ class ForecasterRecursive(ForecasterBase):
                     f"must return a DataFrame with the same number of rows as "
                     f"the input time series - `window_size`: {len_train_index}."
                 )
-            if not (X_train_wf.index == train_index).all():
+            if not X_train_wf.index.equals(train_index):
                 raise ValueError(
                     f"The method `transform_batch` of {type(wf).__name__} "
                     f"must return a DataFrame with the same index as "
@@ -579,19 +712,21 @@ class ForecasterRecursive(ForecasterBase):
             
             X_train_window_features_names_out_.extend(X_train_wf.columns)
             if not X_as_pandas:
-                X_train_wf = X_train_wf.to_numpy()     
+                X_train_wf = X_train_wf.to_numpy()
             X_train_window_features.append(X_train_wf)
 
         return X_train_window_features, X_train_window_features_names_out_
-
 
     def _create_train_X_y(
         self,
         y: pd.Series,
         exog: pd.Series | pd.DataFrame | None = None
     ) -> tuple[
-        pd.DataFrame, 
-        pd.Series, 
+        np.ndarray, 
+        np.ndarray, 
+        pd.Index,
+        list[str], 
+        list[str], 
         list[str], 
         list[str], 
         list[str], 
@@ -613,14 +748,21 @@ class ForecasterRecursive(ForecasterBase):
 
         Returns
         -------
-        X_train : pandas DataFrame
+        X_train : numpy ndarray
             Training values (predictors).
-        y_train : pandas Series
+        y_train : numpy ndarray
             Values of the time series related to each row of `X_train`.
+        train_index : pandas Index
+            Index of the training data.
         exog_names_in_ : list
             Names of the exogenous variables used during training.
+        categorical_features_names_in_ : list
+            Names of the exogenous variables considered as categorical.
         X_train_window_features_names_out_ : list
             Names of the window features included in the matrix `X_train` created
+            internally for training.
+        X_train_calendar_features_names_out_ : list
+            Names of the calendar features included in the matrix `X_train` created
             internally for training.
         X_train_exog_names_out_ : list
             Names of the exogenous variables included in the matrix `X_train` created
@@ -636,10 +778,17 @@ class ForecasterRecursive(ForecasterBase):
             Type of each exogenous variable/s used in training after the transformation
             applied by `transformer_exog`. If `transformer_exog` is not used, it 
             is equal to `exog_dtypes_in_`.
+
+        Notes
+        -----
+        If `y` or `exog` contain interspersed NaN values, rows where `y_train`
+        is NaN are always removed. Rows where `X_train` contains NaN (from
+        lagged NaN in `y` or from NaN in `exog`) are removed only if
+        `dropna_from_series=True`; otherwise a warning is issued.
         
         """
 
-        check_y(y=y)
+        check_y(y=y, allow_nan=True)
         y = input_to_frame(data=y, input_name='y')
 
         if len(y) <= self.window_size:
@@ -654,13 +803,22 @@ class ForecasterRecursive(ForecasterBase):
 
         fit_transformer = False if self.is_fitted else True
         y = transform_dataframe(
-                df                = y, 
-                transformer       = self.transformer_y,
-                fit               = fit_transformer,
-                inverse_transform = False,
+                df                  = y, 
+                transformer         = self.transformer_y,
+                fit                 = fit_transformer,
+                inverse_transform   = False,
+                force_single_column = True
             )
-        y_values, y_index = preprocess_y(y=y)
+        
+        y_values, y_index = check_extract_values_and_index(data=y, data_label='`y`')
         train_index = y_index[self.window_size:]
+
+        if self.calendar_features is not None:
+            if not isinstance(train_index, pd.DatetimeIndex):
+                raise TypeError(
+                    "When `calendar_features` is not `None`, the index of `y` must "
+                    "be a pandas DatetimeIndex."
+                )
 
         if self.differentiation is not None:
             if not self.is_fitted:
@@ -672,10 +830,14 @@ class ForecasterRecursive(ForecasterBase):
         exog_names_in_ = None
         exog_dtypes_in_ = None
         exog_dtypes_out_ = None
-        X_as_pandas = False
+        X_train_exog_names_out_ = None
+        categorical_features_names_in_ = None
         if exog is not None:
             check_exog(exog=exog, allow_nan=True)
             exog = input_to_frame(data=exog, input_name='exog')
+            _, exog_index = check_extract_values_and_index(
+                data=exog, data_label='`exog`', ignore_freq=True, return_values=False
+            )
 
             len_y = len(y_values)
             len_train_index = len(train_index)
@@ -685,7 +847,7 @@ class ForecasterRecursive(ForecasterBase):
                     f"Length of `exog` must be equal to the length of `y` (if index is "
                     f"fully aligned) or length of `y` - `window_size` (if `exog` "
                     f"starts after the first `window_size` values).\n"
-                    f"    `exog`              : ({exog.index[0]} -- {exog.index[-1]})  (n={len_exog})\n"
+                    f"    `exog`              : ({exog_index[0]} -- {exog_index[-1]})  (n={len_exog})\n"
                     f"    `y`                 : ({y.index[0]} -- {y.index[-1]})  (n={len_y})\n"
                     f"    `y` - `window_size` : ({train_index[0]} -- {train_index[-1]})  (n={len_train_index})"
                 )
@@ -699,17 +861,51 @@ class ForecasterRecursive(ForecasterBase):
                        fit               = fit_transformer,
                        inverse_transform = False
                    )
-            
-            check_exog_dtypes(exog, call_check_exog=True)
-            exog_dtypes_out_ = get_exog_dtypes(exog=exog)
-            X_as_pandas = any(
-                not pd.api.types.is_numeric_dtype(dtype) or pd.api.types.is_bool_dtype(dtype) 
-                for dtype in set(exog.dtypes)
-            )
 
-            _, exog_index = preprocess_exog(exog=exog, return_values=False)
+            if self.categorical_features is not None:
+                if self.categorical_features == 'auto':
+                    categorical_features_names_in_ = [
+                        col for col, dtype in exog.dtypes.items()
+                        if not pd.api.types.is_numeric_dtype(dtype)
+                        and not pd.api.types.is_bool_dtype(dtype)
+                    ]
+                else:
+                    missing_cols = set(self.categorical_features) - set(exog.columns)
+                    if missing_cols:
+                        raise ValueError(
+                            f"The following columns specified in `categorical_features` "
+                            f"are not present in `exog` after `transformer_exog`: "
+                            f"{missing_cols}."
+                        )
+                    categorical_features_names_in_ = list(self.categorical_features)
+                
+                if categorical_features_names_in_: 
+                    # This copy is only necessary if `transformer_exog` is not used
+                    if self.transformer_exog is None:
+                        exog = exog.copy()
+                    if fit_transformer:
+                        exog[categorical_features_names_in_] = (
+                            self.categorical_encoder.fit_transform(
+                                exog[categorical_features_names_in_]
+                            )
+                        )
+                    else:
+                        exog[categorical_features_names_in_] = (
+                            self.categorical_encoder.transform(
+                                exog[categorical_features_names_in_]
+                            )
+                        )
+
+            if self.categorical_features is None:
+                check_exog_dtypes(exog, call_check_exog=False)
+            
+            X_train_exog_names_out_ = exog.columns.to_list()
+            exog_dtypes_out_ = get_exog_dtypes(exog=exog)
+
+            exog = exog.to_numpy()
+
             if len_exog == len_y:
-                if not (exog_index == y_index).all():
+                if not exog_index.equals(y_index):
                     raise ValueError(
                         "When `exog` has the same length as `y`, the index of "
                         "`exog` must be aligned with the index of `y` "
@@ -717,9 +913,9 @@ class ForecasterRecursive(ForecasterBase):
                     )
                 # The first `self.window_size` positions have to be removed from 
                 # exog since they are not in X_train.
-                exog = exog.iloc[self.window_size:, ]
+                exog = exog[self.window_size:, ]
             else:
-                if not (exog_index == train_index).all():
+                if not exog_index.equals(train_index):
                     raise ValueError(
                         "When `exog` doesn't contain the first `window_size` observations, "
                         "the index of `exog` must be aligned with the index of `y` minus "
@@ -731,7 +927,7 @@ class ForecasterRecursive(ForecasterBase):
         X_train_features_names_out_ = []
 
         X_train_lags, y_train = self._create_lags(
-            y=y_values, X_as_pandas=X_as_pandas, train_index=train_index
+            y=y_values, train_index=train_index
         )
         if X_train_lags is not None:
             X_train.append(X_train_lags)
@@ -743,58 +939,101 @@ class ForecasterRecursive(ForecasterBase):
             y_window_features = pd.Series(y_values[n_diff:], index=y_index[n_diff:])
             X_train_window_features, X_train_window_features_names_out_ = (
                 self._create_window_features(
-                    y=y_window_features, X_as_pandas=X_as_pandas, train_index=train_index
+                    y=y_window_features, train_index=train_index
                 )
             )
             X_train.extend(X_train_window_features)
             X_train_features_names_out_.extend(X_train_window_features_names_out_)
 
-        X_train_exog_names_out_ = None
         if exog is not None:
-            X_train_exog_names_out_ = exog.columns.to_list()  
-            if not X_as_pandas:
-                exog = exog.to_numpy()     
-            X_train_features_names_out_.extend(X_train_exog_names_out_)
             X_train.append(exog)
-        
+            X_train_features_names_out_.extend(X_train_exog_names_out_)
+
+        X_train_calendar_features_names_out_ = None
+        if self.calendar_features is not None:
+            X_train_calendar = self.calendar_features.fit_transform(train_index).to_numpy()
+            X_train.append(X_train_calendar)
+            X_train_calendar_features_names_out_ = self.calendar_features.feature_names_out_
+            X_train_features_names_out_.extend(X_train_calendar_features_names_out_)
+
+        if len(X_train_features_names_out_) != len(set(X_train_features_names_out_)):
+            duplicated_names = [
+                name for name in set(X_train_features_names_out_)
+                if X_train_features_names_out_.count(name) > 1
+            ]
+            raise ValueError(
+                f"Duplicated feature names detected in X_train: {duplicated_names}."
+            )
+
         if len(X_train) == 1:
             X_train = X_train[0]
         else:
-            if X_as_pandas:
-                X_train = pd.concat(X_train, axis=1)
-            else:
-                X_train = np.concatenate(X_train, axis=1)
-                
-        if X_as_pandas:
-            X_train.index = train_index
+            X_train = np.concatenate(X_train, axis=1)
+
+        # --- NaN row filtering (interspersed NaN support) ---
+        if np.isnan(y_train).any():
+            mask = ~np.isnan(y_train)
+            y_train = y_train[mask]
+            X_train = X_train[mask]
+            train_index = train_index[mask]
+            warnings.warn(
+                "NaNs detected in `y_train`. They have been dropped because the "
+                "target variable cannot have NaN values. Same rows have been "
+                "dropped from `X_train` to maintain alignment. This is caused by "
+                "interspersed NaNs in `y`.",
+                MissingValuesWarning
+            )
+
+        if self.dropna_from_series:
+            nan_rows = pd.isna(X_train).any(axis=1)
+            if nan_rows.any():
+                mask = ~nan_rows
+                X_train = X_train[mask]
+                y_train = y_train[mask]
+                train_index = train_index[mask]
+                warnings.warn(
+                    "NaNs detected in `X_train`. They have been dropped. If "
+                    "you want to keep them, set `forecaster.dropna_from_series = False`. "
+                    "Same rows have been removed from `y_train` to maintain alignment. "
+                    "This is caused by interspersed NaNs in `y` or `exog`.",
+                    MissingValuesWarning
+                )
         else:
-            X_train = pd.DataFrame(
-                          data    = X_train,
-                          index   = train_index,
-                          columns = X_train_features_names_out_
-                      )
-        
-        y_train = pd.Series(
-                      data  = y_train,
-                      index = train_index,
-                      name  = 'y'
-                  )
+            if pd.isna(X_train).any():
+                warnings.warn(
+                    "NaNs detected in `X_train`. Some estimators do not allow "
+                    "NaN values during training. If you want to drop them, "
+                    "set `forecaster.dropna_from_series = True`.",
+                    MissingValuesWarning
+                )
+
+        if len(y_train) == 0:
+            raise ValueError(
+                "All samples have been removed due to NaNs. Set "
+                "`forecaster.dropna_from_series = False` or review `y` and "
+                "`exog` values."
+            )
 
         return (
             X_train,
             y_train,
+            train_index,
             exog_names_in_,
+            categorical_features_names_in_,
             X_train_window_features_names_out_,
+            X_train_calendar_features_names_out_,
             X_train_exog_names_out_,
             X_train_features_names_out_,
             exog_dtypes_in_,
             exog_dtypes_out_
         )
     
+    @manage_warnings
     def create_train_X_y(
         self,
         y: pd.Series,
         exog: pd.Series | pd.DataFrame | None = None,
+        suppress_warnings: bool = False
     ) -> tuple[pd.DataFrame, pd.Series]:
         """
         Create training matrices from univariate time series and exogenous
@@ -807,20 +1046,57 @@ class ForecasterRecursive(ForecasterBase):
         exog : pandas Series, pandas DataFrame, default None
             Exogenous variable/s included as predictor/s. Must have the same
             number of observations as `y` and their indexes must be aligned.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the creation
+            of the training matrices. See skforecast.exceptions.warn_skforecast_categories 
+            for more information.
 
         Returns
         -------
         X_train : pandas DataFrame
             Training values (predictors).
         y_train : pandas Series
-            Values of the time series related to each row of `X_data`.
+            Values of the time series related to each row of `X_train`.
+
+        Notes
+        -----
+        If `y` or `exog` contain interspersed NaN values, rows where `y_train`
+        is NaN are always removed. Rows where `X_train` contains NaN (from
+        lagged NaN in `y` or from NaN in `exog`) are removed only if
+        `dropna_from_series=True`; otherwise a warning is issued.
         
         """
 
-        output = self._create_train_X_y(y=y, exog=exog)
+        (
+            X_train,
+            y_train,
+            train_index,
+            _,
+            _,
+            _,
+            _,
+            _,
+            X_train_features_names_out_,
+            _,
+            exog_dtypes_out_
+        ) = self._create_train_X_y(y=y, exog=exog)
 
-        X_train = output[0]
-        y_train = output[1]
+        X_train = pd.DataFrame(
+                      data    = X_train,
+                      index   = train_index,
+                      columns = X_train_features_names_out_
+                  )
+        
+        if exog_dtypes_out_ is not None:
+            X_train_dtypes = {col: float for col in X_train_features_names_out_}
+            X_train_dtypes.update(exog_dtypes_out_)
+            X_train = X_train.astype(X_train_dtypes, copy=False)
+        
+        y_train = pd.Series(
+                      data  = y_train,
+                      index = train_index,
+                      name  = 'y'
+                  )
 
         return X_train, y_train
 
@@ -829,10 +1105,12 @@ class ForecasterRecursive(ForecasterBase):
         y: pd.Series,
         initial_train_size: int,
         exog: pd.Series | pd.DataFrame | None = None
-    ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, dict[str, object]]:
         """
         Create matrices needed to train and test the forecaster for one-step-ahead
-        predictions.
+        predictions. Uses `_create_train_X_y` to work directly with numpy arrays
+        and precomputes sample weights and fit kwargs (including categorical
+        feature configuration) so they are computed once rather than per trial.
 
         Parameters
         ----------
@@ -847,39 +1125,80 @@ class ForecasterRecursive(ForecasterBase):
         
         Returns
         -------
-        X_train : pandas DataFrame
+        X_train : numpy ndarray
             Predictor values used to train the model.
-        y_train : pandas Series
+        y_train : numpy ndarray
             Target values related to each row of `X_train`.
-        X_test : pandas DataFrame
+        X_test : numpy ndarray
             Predictor values used to test the model.
-        y_test : pandas Series
+        y_test : numpy ndarray
             Target values related to each row of `X_test`.
+        sample_weight : numpy ndarray, None
+            Precomputed sample weights for training. `None` if no `weight_func`.
+        fit_kwargs : dict
+            Precomputed keyword arguments for `estimator.fit`, including
+            categorical feature configuration.
         
         """
 
         is_fitted = self.is_fitted
         self.is_fitted = False
-        X_train, y_train, *_ = self._create_train_X_y(
-            y    = y.iloc[: initial_train_size],
-            exog = exog.iloc[: initial_train_size] if exog is not None else None
-        )
+
+        (
+            X_train,
+            y_train,
+            train_index,
+            _,
+            categorical_features_names_in_,
+            _,
+            _,
+            _,
+            X_train_features_names_out_,
+            _,
+            _
+        ) = self._create_train_X_y(
+                y    = y.iloc[:initial_train_size],
+                exog = exog.iloc[:initial_train_size] if exog is not None else None
+            )
 
         test_init = initial_train_size - self.window_size
         self.is_fitted = True
-        X_test, y_test, *_ = self._create_train_X_y(
-            y    = y.iloc[test_init:],
-            exog = exog.iloc[test_init:] if exog is not None else None
-        )
+
+        (
+            X_test,
+            y_test,
+            *_
+        ) = self._create_train_X_y(
+                y    = y.iloc[test_init:],
+                exog = exog.iloc[test_init:] if exog is not None else None
+            )
 
         self.is_fitted = is_fitted
 
-        return X_train, y_train, X_test, y_test
+        sample_weight = self.create_sample_weights(X_train=train_index)
 
+        if self.categorical_features is not None:
+            fit_kwargs = configure_estimator_categorical_features(
+                             estimator                      = self.estimator,
+                             categorical_features_names_in_ = categorical_features_names_in_,
+                             X_train_features_names_out_    = X_train_features_names_out_,
+                             fit_kwargs                     = {**self.fit_kwargs}
+                         )
+        else:
+            fit_kwargs = {**self.fit_kwargs}
+
+        X_train = cast_catboost_categorical_columns(
+            X=X_train, fit_kwargs=fit_kwargs, estimator=self.estimator
+        )
+        X_test = cast_catboost_categorical_columns(
+            X=X_test, fit_kwargs=fit_kwargs, estimator=self.estimator
+        )
+
+        return X_train, y_train, X_test, y_test, sample_weight, fit_kwargs
 
     def create_sample_weights(
         self,
-        X_train: pd.DataFrame,
+        X_train: pd.DataFrame | pd.Index,
     ) -> np.ndarray:
         """
         Create weights for each observation according to the forecaster's attribute
@@ -887,8 +1206,9 @@ class ForecasterRecursive(ForecasterBase):
 
         Parameters
         ----------
-        X_train : pandas DataFrame
-            Dataframe created with the `create_train_X_y` method, first return.
+        X_train : pandas DataFrame, pandas Index
+            Dataframe created with the `create_train_X_y` method, first return, 
+            or the index of the DataFrame.
 
         Returns
         -------
@@ -900,8 +1220,10 @@ class ForecasterRecursive(ForecasterBase):
         sample_weight = None
 
         if self.weight_func is not None:
-            sample_weight = self.weight_func(X_train.index)
-
+            sample_weight = self.weight_func(
+                X_train.index if isinstance(X_train, pd.DataFrame) else X_train
+            )
+        
         if sample_weight is not None:
             if np.isnan(sample_weight).any():
                 raise ValueError(
@@ -919,19 +1241,20 @@ class ForecasterRecursive(ForecasterBase):
 
         return sample_weight
 
-
+    @manage_warnings
     def fit(
         self,
         y: pd.Series,
         exog: pd.Series | pd.DataFrame | None = None,
         store_last_window: bool = True,
         store_in_sample_residuals: bool = False,
-        random_state: int = 123
+        random_state: int = 123,
+        suppress_warnings: bool = False
     ) -> None:
         """
         Training Forecaster.
 
-        Additional arguments to be passed to the `fit` method of the regressor 
+        Additional arguments to be passed to the `fit` method of the estimator 
         can be added with the `fit_kwargs` argument when initializing the forecaster.
         
         Parameters
@@ -952,6 +1275,10 @@ class ForecasterRecursive(ForecasterBase):
         random_state : int, default 123
             Set a seed for the random generator so that the stored sample 
             residuals are always deterministic.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the training 
+            process. See skforecast.exceptions.warn_skforecast_categories for more
+            information.
 
         Returns
         -------
@@ -961,61 +1288,82 @@ class ForecasterRecursive(ForecasterBase):
 
         # TODO: create a method reset_forecaster() to reset all attributes
         # Reset values in case the forecaster has already been fitted.
-        self.last_window_                       = None
-        self.index_type_                        = None
-        self.index_freq_                        = None
-        self.training_range_                    = None
-        self.series_name_in_                    = None
-        self.exog_in_                           = False
-        self.exog_names_in_                     = None
-        self.exog_type_in_                      = None
-        self.exog_dtypes_in_                    = None
-        self.exog_dtypes_out_                   = None
-        self.X_train_window_features_names_out_ = None
-        self.X_train_exog_names_out_            = None
-        self.X_train_features_names_out_        = None
-        self.in_sample_residuals_               = None
-        self.in_sample_residuals_by_bin_        = None
-        self.binner_intervals_                  = None
-        self.is_fitted                          = False
-        self.fit_date                           = None
+        self.last_window_                         = None
+        self.index_type_                          = None
+        self.index_freq_                          = None
+        self.training_range_                      = None
+        self.series_name_in_                      = None
+        self.exog_in_                             = False
+        self.exog_names_in_                       = None
+        self.exog_type_in_                        = None
+        self.exog_dtypes_in_                      = None
+        self.exog_dtypes_out_                     = None
+        self.categorical_features_names_in_       = None
+        self.X_train_window_features_names_out_   = None
+        self.X_train_calendar_features_names_out_ = None
+        self.X_train_exog_names_out_              = None
+        self.X_train_features_names_out_          = None
+        self.in_sample_residuals_                 = None
+        self.in_sample_residuals_by_bin_          = None
+        self.out_sample_residuals_                = None
+        self.out_sample_residuals_by_bin_         = None
+        self.binner_intervals_                    = None
+        self.is_fitted                            = False
+        self.fit_date                             = None
 
         (
             X_train,
             y_train,
+            train_index,
             exog_names_in_,
+            categorical_features_names_in_,
             X_train_window_features_names_out_,
+            X_train_calendar_features_names_out_,
             X_train_exog_names_out_,
             X_train_features_names_out_,
             exog_dtypes_in_,
             exog_dtypes_out_
         ) = self._create_train_X_y(y=y, exog=exog)
-        sample_weight = self.create_sample_weights(X_train=X_train)
+
+        sample_weight = self.create_sample_weights(X_train=train_index)
+
+        if self.categorical_features is not None:
+            fit_kwargs = configure_estimator_categorical_features(
+                             estimator                      = self.estimator,
+                             categorical_features_names_in_ = categorical_features_names_in_,
+                             X_train_features_names_out_    = X_train_features_names_out_,
+                             fit_kwargs                     = {**self.fit_kwargs}
+                         )
+        else:
+            fit_kwargs = {**self.fit_kwargs}
+
+        X_train = cast_catboost_categorical_columns(
+            X=X_train, fit_kwargs=fit_kwargs, estimator=self.estimator
+        )
 
         if sample_weight is not None:
-            self.regressor.fit(
+            self.estimator.fit(
                 X             = X_train,
                 y             = y_train,
                 sample_weight = sample_weight,
-                **self.fit_kwargs
+                **fit_kwargs
             )
         else:
-            self.regressor.fit(X=X_train, y=y_train, **self.fit_kwargs)
+            self.estimator.fit(X=X_train, y=y_train, **fit_kwargs)
 
         self.X_train_window_features_names_out_ = X_train_window_features_names_out_
+        self.X_train_calendar_features_names_out_ = X_train_calendar_features_names_out_
         self.X_train_features_names_out_ = X_train_features_names_out_
 
         self.is_fitted = True
         self.series_name_in_ = y.name if y.name is not None else 'y'
         self.fit_date = pd.Timestamp.today().strftime('%Y-%m-%d %H:%M:%S')
-        self.training_range_ = preprocess_y(
-            y=y, return_values=False, suppress_warnings=True
-        )[1][[0, -1]]
-        self.index_type_ = type(X_train.index)
-        if isinstance(X_train.index, pd.DatetimeIndex):
-            self.index_freq_ = X_train.index.freqstr
+        self.training_range_ = y.index[[0, -1]]
+        self.index_type_ = type(y.index)
+        if isinstance(y.index, pd.DatetimeIndex):
+            self.index_freq_ = y.index.freq
         else: 
-            self.index_freq_ = X_train.index.step
+            self.index_freq_ = y.index.step
 
         if exog is not None:
             self.exog_in_ = True
@@ -1023,13 +1371,21 @@ class ForecasterRecursive(ForecasterBase):
             self.exog_names_in_ = exog_names_in_
             self.exog_dtypes_in_ = exog_dtypes_in_
             self.exog_dtypes_out_ = exog_dtypes_out_
+            self.categorical_features_names_in_ = categorical_features_names_in_
             self.X_train_exog_names_out_ = X_train_exog_names_out_
 
         # NOTE: This is done to save time during fit in functions such as backtesting()
         if self._probabilistic_mode is not False:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="X does not have valid feature names",
+                    category=UserWarning
+                )
+                y_pred = self.estimator.predict(X_train).ravel()
             self._binning_in_sample_residuals(
-                y_true                    = y_train.to_numpy(),
-                y_pred                    = self.regressor.predict(X_train).ravel(),
+                y_true                    = y_train,
+                y_pred                    = y_pred,
                 store_in_sample_residuals = store_in_sample_residuals,
                 random_state              = random_state
             )
@@ -1056,12 +1412,14 @@ class ForecasterRecursive(ForecasterBase):
         stored in the forecaster object as `in_sample_residuals_` and
         `in_sample_residuals_by_bin_`.
 
+        Optimized version that uses pure numpy operations instead of pandas
+        DataFrame + groupby.
+
         `y_true` and `y_pred` assumed to be differentiated and or transformed
         according to the attributes `differentiation` and `transformer_y`.
         The number of residuals stored per bin is limited to 
         `10_000 // self.binner.n_bins_`. The total number of residuals stored is
         `10_000`.
-        **New in version 0.14.0**
 
         Parameters
         ----------
@@ -1073,7 +1431,6 @@ class ForecasterRecursive(ForecasterBase):
             If `True`, in-sample residuals will be stored in the forecaster object
             after fitting (`in_sample_residuals_` and `in_sample_residuals_by_bin_`
             attributes).
-            If `False`, only the intervals of the bins are stored.
             If `False`, only the intervals of the bins are stored.
         random_state : int, default 123
             Set a seed for the random generator so that the stored sample 
@@ -1088,23 +1445,25 @@ class ForecasterRecursive(ForecasterBase):
         residuals = y_true - y_pred
 
         if self._probabilistic_mode == "binned":
-            data = pd.DataFrame({'prediction': y_pred, 'residuals': residuals})
             self.binner.fit(y_pred)
             self.binner_intervals_ = self.binner.intervals_
     
         if store_in_sample_residuals:
             rng = np.random.default_rng(seed=random_state)
             if self._probabilistic_mode == "binned":
-                data['bin'] = self.binner.transform(y_pred).astype(int)
-                self.in_sample_residuals_by_bin_ = (
-                    data.groupby('bin')['residuals'].apply(np.array).to_dict()
-                )
-
+                bins = self.binner.transform(y_pred).astype(int)
                 max_sample = 10_000 // self.binner.n_bins_
-                for k, v in self.in_sample_residuals_by_bin_.items():
-                    if len(v) > max_sample:
-                        sample = v[rng.integers(low=0, high=len(v), size=max_sample)]
-                        self.in_sample_residuals_by_bin_[k] = sample
+                
+                self.in_sample_residuals_by_bin_ = {}
+                for b in range(self.binner.n_bins_):
+                    bin_residuals = residuals[bins == b]
+                    if len(bin_residuals) == 0:
+                        continue
+                    if len(bin_residuals) > max_sample:
+                        bin_residuals = bin_residuals[
+                            rng.integers(low=0, high=len(bin_residuals), size=max_sample)
+                        ]
+                    self.in_sample_residuals_by_bin_[b] = bin_residuals
    
             if len(residuals) > 10_000:
                 residuals = residuals[
@@ -1112,7 +1471,7 @@ class ForecasterRecursive(ForecasterBase):
                 ]
 
             self.in_sample_residuals_ = residuals
-        
+
     def _create_predict_inputs(
         self,
         steps: int | str | pd.Timestamp, 
@@ -1122,7 +1481,9 @@ class ForecasterRecursive(ForecasterBase):
         use_in_sample_residuals: bool = True,
         use_binned_residuals: bool = True,
         check_inputs: bool = True
-    ) -> tuple[np.ndarray, np.ndarray | None, pd.Index, int]:
+    ) -> tuple[
+        np.ndarray, np.ndarray | None, np.ndarray | None, pd.Index, int, object | None
+    ]:
         """
         Create the inputs needed for the first iteration of the prediction 
         process. As this is a recursive process, the last window is updated at 
@@ -1168,10 +1529,18 @@ class ForecasterRecursive(ForecasterBase):
             iteration of the prediction (t + 1).
         exog_values : numpy ndarray, None
             Exogenous variable/s included as predictor/s.
+        calendar_values : numpy ndarray, None
+            Calendar features included as predictor/s. `None` if no
+            `calendar_features` is set.
         prediction_index : pandas Index
             Index of the predictions.
         steps: int
             Number of future steps predicted.
+        differentiator : TimeSeriesDifferentiator, None
+            A copy of the differentiator fitted with the last window values.
+            `None` if no differentiation is applied. This is used to reverse
+            the differentiation of predictions without mutating the forecaster's
+            internal state.
         
         """
 
@@ -1188,18 +1557,16 @@ class ForecasterRecursive(ForecasterBase):
 
         if check_inputs:
             check_predict_input(
-                forecaster_name  = type(self).__name__,
-                steps            = steps,
-                is_fitted        = self.is_fitted,
-                exog_in_         = self.exog_in_,
-                index_type_      = self.index_type_,
-                index_freq_      = self.index_freq_,
-                window_size      = self.window_size,
-                last_window      = last_window,
-                exog             = exog,
-                exog_type_in_    = self.exog_type_in_,
-                exog_names_in_   = self.exog_names_in_,
-                interval         = None
+                forecaster_name = type(self).__name__,
+                steps           = steps,
+                is_fitted       = self.is_fitted,
+                exog_in_        = self.exog_in_,
+                index_type_     = self.index_type_,
+                index_freq_     = self.index_freq_,
+                window_size     = self.window_size,
+                last_window     = last_window,
+                exog            = exog,
+                exog_names_in_  = self.exog_names_in_
             )
 
             if predict_probabilistic:
@@ -1213,11 +1580,9 @@ class ForecasterRecursive(ForecasterBase):
                     out_sample_residuals_by_bin_ = self.out_sample_residuals_by_bin_
                 )
 
-        last_window = last_window.iloc[-self.window_size:].copy()
-        last_window_values, last_window_index = preprocess_last_window(
-                                                    last_window = last_window
-                                                )
-
+        last_window_values = (
+            last_window.iloc[-self.window_size:].to_numpy(copy=True).ravel()
+        )
         last_window_values = transform_numpy(
                                  array             = last_window_values,
                                  transformer       = self.transformer_y,
@@ -1225,41 +1590,82 @@ class ForecasterRecursive(ForecasterBase):
                                  inverse_transform = False
                              )
         if self.differentiation is not None:
-            last_window_values = self.differentiator.fit_transform(last_window_values)
+            differentiator = copy(self.differentiator)
+            last_window_values = differentiator.fit_transform(last_window_values)
+        else:
+            differentiator = None
 
         if exog is not None:
+
             exog = input_to_frame(data=exog, input_name='exog')
-            exog = exog.loc[:, self.exog_names_in_]
+            if exog.columns.tolist() != self.exog_names_in_:
+                exog = exog[self.exog_names_in_]
+
             exog = transform_dataframe(
                        df                = exog,
                        transformer       = self.transformer_exog,
                        fit               = False,
                        inverse_transform = False
                    )
-            check_exog_dtypes(exog=exog)
+
+            if self.categorical_features is not None and self.categorical_features_names_in_:
+                # This copy is only necessary if `transformer_exog` is not used
+                if self.transformer_exog is None:
+                    exog = exog.copy()
+                
+                exog[self.categorical_features_names_in_] = (
+                    self.categorical_encoder.transform(
+                        exog[self.categorical_features_names_in_]
+                    )
+                )
+            
+            # NOTE: Only check dtypes if they are not the same as seen in training
+            if not exog.dtypes.to_dict() == self.exog_dtypes_out_:
+                check_exog_dtypes(exog=exog)
+            else:
+                check_exog(exog=exog, allow_nan=False)
+            
             exog_values = exog.to_numpy()[:steps]
         else:
             exog_values = None
 
         prediction_index = expand_index(
-                               index = last_window_index,
+                               index = last_window.index,
                                steps = steps,
                            )
 
-        return last_window_values, exog_values, prediction_index, steps
+        if self.calendar_features is not None:
+            calendar_values = self.calendar_features.transform(
+                prediction_index
+            ).to_numpy()
+        else:
+            calendar_values = None
 
+        return (
+            last_window_values,
+            exog_values,
+            calendar_values,
+            prediction_index,
+            steps,
+            differentiator
+        )
 
     def _recursive_predict(
         self,
         steps: int,
         last_window_values: np.ndarray,
         exog_values: np.ndarray | None = None,
-        residuals: np.ndarray | dict[str, np.ndarray] | None = None,
-        use_binned_residuals: bool = True,
+        calendar_values: np.ndarray | None = None
     ) -> np.ndarray:
         """
         Predict n steps ahead. It is an iterative process in which, each prediction,
         is used as a predictor for the next step.
+
+        Fast prediction paths (bypassing sklearn's predict overhead) are used for
+        the following estimators: linear models inheriting from sklearn's
+        `LinearModel` (np.dot), `LGBMRegressor` (booster.predict),
+        `XGBRegressor` (booster.inplace_predict), `RandomForestRegressor` and
+        `DecisionTreeRegressor` (tree_.predict).
         
         Parameters
         ----------
@@ -1270,12 +1676,8 @@ class ForecasterRecursive(ForecasterBase):
             iteration of the prediction (t + 1).
         exog_values : numpy ndarray, default None
             Exogenous variable/s included as predictor/s.
-        residuals : numpy ndarray, dict, default None
-            Residuals used to generate bootstrapping predictions.
-        use_binned_residuals : bool, default True
-            If `True`, residuals are selected based on the predicted values 
-            (binned selection).
-            If `False`, residuals are selected randomly.
+        calendar_values : numpy ndarray, default None
+            Calendar features included as predictor/s.
 
         Returns
         -------
@@ -1284,7 +1686,7 @@ class ForecasterRecursive(ForecasterBase):
         
         """
 
-        original_device = set_cpu_gpu_device(regressor=self.regressor, device='cpu')
+        original_device = set_cpu_gpu_device(estimator=self.estimator, device='cpu')
 
         n_lags = len(self.lags) if self.lags is not None else 0
         n_window_features = (
@@ -1293,54 +1695,202 @@ class ForecasterRecursive(ForecasterBase):
             else 0
         )
         n_exog = exog_values.shape[1] if exog_values is not None else 0
+        n_calendar = calendar_values.shape[1] if calendar_values is not None else 0
+        n_features = n_lags + n_window_features + n_exog + n_calendar
 
-        X = np.full(
-            shape=(n_lags + n_window_features + n_exog), fill_value=np.nan, dtype=float
-        )
+        X = np.full(shape=(n_features), fill_value=np.nan, dtype=float)
         predictions = np.full(shape=steps, fill_value=np.nan, dtype=float)
         last_window = np.concatenate((last_window_values, predictions))
 
+        predict_fn = _build_predict_function(self.estimator)
+
+        has_lags = self.lags is not None
+        has_window_features = self.window_features is not None
+        has_exog = exog_values is not None
+        has_calendar = calendar_values is not None
+
+        exog_start = n_lags + n_window_features
+        exog_end = exog_start + n_exog
+
+        if has_lags and not self.lags_are_contiguous:
+            neg_lags = -self.lags
+
         for i in range(steps):
 
-            if self.lags is not None:
-                X[:n_lags] = last_window[-self.lags - (steps - i)]
-            if self.window_features is not None:
-                X[n_lags : n_lags + n_window_features] = np.concatenate(
+            remaining = steps - i
+
+            if has_lags:
+                if self.lags_are_contiguous:
+                    X[:n_lags] = last_window[-(remaining + n_lags): -remaining][::-1]
+                else:
+                    X[:n_lags] = last_window[neg_lags - remaining]
+            
+            if has_window_features:
+                window_data = last_window[i : -remaining]
+                X[n_lags : exog_start] = np.concatenate(
                     [
-                        wf.transform(last_window[i : -(steps - i)])
+                        wf.transform(window_data)
                         for wf in self.window_features
                     ]
                 )
-            if exog_values is not None:
-                X[n_lags + n_window_features:] = exog_values[i]
+            
+            if has_exog:
+                X[exog_start : exog_end] = exog_values[i]
+
+            if has_calendar:
+                X[exog_end:] = calendar_values[i]
         
-            pred = self.regressor.predict(X.reshape(1, -1)).ravel()
-            
-            if residuals is not None:
-                if use_binned_residuals:
-                    predicted_bin = self.binner.transform(pred).item()
-                    step_residual = residuals[predicted_bin][i]
-                else:
-                    step_residual = residuals[i]
-                
-                pred += step_residual
-            
-            predictions[i] = pred[0]
+            pred = predict_fn(X.reshape(1, -1)).item()
+            predictions[i] = pred
 
             # Update `last_window` values. The first position is discarded and 
             # the new prediction is added at the end.
-            last_window[-(steps - i)] = pred[0]
+            last_window[-remaining] = pred
 
-        set_cpu_gpu_device(regressor=self.regressor, device=original_device)
+        set_cpu_gpu_device(estimator=self.estimator, device=original_device)
 
         return predictions
 
+    def _recursive_predict_bootstrapping(
+        self,
+        steps: int,
+        last_window_values: np.ndarray,
+        sampled_residuals: np.ndarray,
+        use_binned_residuals: bool,
+        n_boot: int,
+        exog_values: np.ndarray | None = None,
+        calendar_values: np.ndarray | None = None
+    ) -> np.ndarray:
+        """
+        Vectorized bootstrap prediction - predict all n_boot iterations per step.
+        Instead of running n_boot sequential predictions, this method predicts 
+        all bootstrap samples at once per step, significantly reducing overhead.
+
+        Fast prediction paths (bypassing sklearn's predict overhead) are used for
+        the following estimators: linear models inheriting from sklearn's
+        `LinearModel` (np.dot), `LGBMRegressor` (booster.predict),
+        `XGBRegressor` (booster.inplace_predict), `RandomForestRegressor` and
+        `DecisionTreeRegressor` (tree_.predict).
+        
+        Parameters
+        ----------
+        steps : int
+            Number of steps to predict. 
+        last_window_values : numpy ndarray
+            Series values used to create the predictors needed in the first 
+            iteration of the prediction (t + 1).
+        sampled_residuals : numpy ndarray
+            Pre-sampled residuals for all bootstrap iterations.
+            - If `use_binned_residuals=True`: 3D array of shape (n_bins, steps, n_boot)
+            - If `use_binned_residuals=False`: 2D array of shape (steps, n_boot)
+        use_binned_residuals : bool
+            If `True`, residuals are selected based on the predicted values.
+            If `False`, residuals are selected randomly.
+        n_boot : int
+            Number of bootstrap iterations.
+        exog_values : numpy ndarray, default None
+            Exogenous variable/s included as predictor/s.
+        calendar_values : numpy ndarray, default None
+            Calendar features included as predictor/s.
+
+        Returns
+        -------
+        predictions : numpy ndarray
+            Predicted values with shape (steps, n_boot).
+        
+        """
+
+        original_device = set_cpu_gpu_device(estimator=self.estimator, device='cpu')
+
+        n_lags = len(self.lags) if self.lags is not None else 0
+        n_window_features = (
+            len(self.X_train_window_features_names_out_)
+            if self.window_features is not None
+            else 0
+        )
+        n_exog = exog_values.shape[1] if exog_values is not None else 0
+        n_calendar = calendar_values.shape[1] if calendar_values is not None else 0
+        n_features = n_lags + n_window_features + n_exog + n_calendar
+
+        # Input matrix for prediction: shape (n_boot, n_features)
+        X = np.full((n_boot, n_features), fill_value=np.nan, dtype=float)
+        
+        # Output predictions: shape (steps, n_boot)
+        predictions = np.full((steps, n_boot), fill_value=np.nan, dtype=float)
+        
+        # Expand last_window to 2D: (window_size + steps, n_boot)
+        # Each column represents a separate bootstrap trajectory
+        last_window = np.tile(last_window_values[:, np.newaxis], (1, n_boot))
+        last_window = np.vstack([last_window, np.full((steps, n_boot), np.nan)])
+
+        predict_fn = _build_predict_function(self.estimator)
+
+        has_lags = self.lags is not None
+        has_window_features = self.window_features is not None
+        has_exog = exog_values is not None
+        has_calendar = calendar_values is not None
+
+        exog_start = n_lags + n_window_features
+        exog_end = exog_start + n_exog
+
+        if has_lags and not self.lags_are_contiguous:
+            neg_lags = -self.lags
+
+        if use_binned_residuals:
+            boot_indices = np.arange(n_boot)
+
+        for i in range(steps):
+
+            remaining = steps - i
+
+            if has_lags:
+                if self.lags_are_contiguous:
+                    X[:, :n_lags] = last_window[-(remaining + n_lags): -remaining, :][::-1].T
+                else:
+                    X[:, :n_lags] = last_window[neg_lags - remaining, :].T
+            
+            if has_window_features:
+                window_data = last_window[:-remaining, :]
+                # transform accepts 2D: (window_length, n_boot) -> (n_boot, n_stats)
+                # and concatenate along axis=1: (n_boot, total_window_features)
+                X[:, n_lags : exog_start] = np.concatenate(
+                    [
+                        wf.transform(window_data) 
+                        for wf in self.window_features
+                    ],
+                    axis=1
+                )
+            
+            if has_exog:
+                X[:, exog_start : exog_end] = exog_values[i]
+
+            if has_calendar:
+                X[:, exog_end:] = calendar_values[i]
+        
+            pred = predict_fn(X)
+            
+            if use_binned_residuals:
+                # sampled_residuals is a 3D array: (n_bins, steps, n_boot)
+                pred_bins = self.binner.transform(pred).astype(int)
+                pred += sampled_residuals[pred_bins, i, boot_indices]
+            else:
+                pred += sampled_residuals[i, :]
+            
+            predictions[i, :] = pred
+            last_window[-remaining, :] = pred
+
+        set_cpu_gpu_device(estimator=self.estimator, device=original_device)
+
+        return predictions
+
+    @manage_warnings
     def create_predict_X(
         self,
         steps: int,
         last_window: pd.Series | pd.DataFrame | None = None,
         exog: pd.Series | pd.DataFrame | None = None,
-        check_inputs: bool = True
+        check_inputs: bool = True,
+        suppress_warnings: bool = False
     ) -> pd.DataFrame:
         """
         Create the predictors needed to predict `steps` ahead. As it is a recursive
@@ -1378,8 +1928,10 @@ class ForecasterRecursive(ForecasterBase):
         (
             last_window_values,
             exog_values,
+            calendar_values,
             prediction_index,
-            steps
+            steps,
+            _
         ) = self._create_predict_inputs(
                 steps        = steps,
                 last_window  = last_window,
@@ -1396,7 +1948,8 @@ class ForecasterRecursive(ForecasterBase):
             predictions = self._recursive_predict(
                               steps              = steps,
                               last_window_values = last_window_values,
-                              exog_values        = exog_values
+                              exog_values        = exog_values,
+                              calendar_values    = calendar_values
                           )
 
         X_predict = []
@@ -1424,6 +1977,9 @@ class ForecasterRecursive(ForecasterBase):
         if exog is not None:
             X_predict.append(exog_values)
 
+        if self.calendar_features is not None:
+            X_predict.append(calendar_values)
+
         X_predict = pd.DataFrame(
                         data    = np.concatenate(X_predict, axis=1),
                         columns = self.X_train_features_names_out_,
@@ -1431,12 +1987,9 @@ class ForecasterRecursive(ForecasterBase):
                     )
         
         if self.exog_in_:
-            categorical_features = any(
-                not pd.api.types.is_numeric_dtype(dtype) or pd.api.types.is_bool_dtype(dtype) 
-                for dtype in set(self.exog_dtypes_out_)
-            )
-            if categorical_features:
-                X_predict = X_predict.astype(self.exog_dtypes_out_)
+            X_predict_dtypes = {col: float for col in self.X_train_features_names_out_}
+            X_predict_dtypes.update(self.exog_dtypes_out_)
+            X_predict = X_predict.astype(X_predict_dtypes, copy=False)
 
         if self.transformer_y is not None or self.differentiation is not None:
             warnings.warn(
@@ -1451,16 +2004,17 @@ class ForecasterRecursive(ForecasterBase):
 
         return X_predict
 
-
+    @manage_warnings
     def predict(
         self,
         steps: int | str | pd.Timestamp,
         last_window: pd.Series | pd.DataFrame | None = None,
         exog: pd.Series | pd.DataFrame | None = None,
-        check_inputs: bool = True
+        check_inputs: bool = True,
+        suppress_warnings: bool = False
     ) -> pd.Series:
         """
-        Predict n steps ahead. It is an recursive process in which, each prediction,
+        Predict n steps ahead. It is a recursive process in which, each prediction,
         is used as a predictor for the next step.
         
         Parameters
@@ -1482,6 +2036,10 @@ class ForecasterRecursive(ForecasterBase):
             If `True`, the input is checked for possible warnings and errors 
             with the `check_predict_input` function. This argument is created 
             for internal use and is not recommended to be changed.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the prediction 
+            process. See skforecast.exceptions.warn_skforecast_categories for more
+            information.
 
         Returns
         -------
@@ -1493,8 +2051,10 @@ class ForecasterRecursive(ForecasterBase):
         (
             last_window_values,
             exog_values,
+            calendar_values,
             prediction_index,
-            steps
+            steps,
+            differentiator
         ) = self._create_predict_inputs(
                 steps        = steps,
                 last_window  = last_window,
@@ -1511,11 +2071,12 @@ class ForecasterRecursive(ForecasterBase):
             predictions = self._recursive_predict(
                               steps              = steps,
                               last_window_values = last_window_values,
-                              exog_values        = exog_values
+                              exog_values        = exog_values,
+                              calendar_values    = calendar_values
                           )
 
-        if self.differentiation is not None:
-            predictions = self.differentiator.inverse_transform_next_window(predictions)
+        if differentiator is not None:
+            predictions = differentiator.inverse_transform_next_window(predictions)
 
         predictions = transform_numpy(
                           array             = predictions,
@@ -1532,7 +2093,7 @@ class ForecasterRecursive(ForecasterBase):
 
         return predictions
 
-
+    @manage_warnings
     def predict_bootstrapping(
         self,
         steps: int | str | pd.Timestamp,
@@ -1541,7 +2102,8 @@ class ForecasterRecursive(ForecasterBase):
         n_boot: int = 250,
         use_in_sample_residuals: bool = True,
         use_binned_residuals: bool = True,
-        random_state: int = 123
+        random_state: int = 123,
+        suppress_warnings: bool = False
     ) -> pd.DataFrame:
         """
         Generate multiple forecasting predictions using a bootstrapping process.
@@ -1579,6 +2141,10 @@ class ForecasterRecursive(ForecasterBase):
             If `False`, residuals are selected randomly.
         random_state : int, default 123
             Seed for the random number generator to ensure reproducibility.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the prediction 
+            process. See skforecast.exceptions.warn_skforecast_categories for more
+            information.
 
         Returns
         -------
@@ -1596,8 +2162,10 @@ class ForecasterRecursive(ForecasterBase):
         (
             last_window_values,
             exog_values,
+            calendar_values,
             prediction_index,
-            steps
+            steps,
+            differentiator
         ) = self._create_predict_inputs(
                 steps                   = steps, 
                 last_window             = last_window, 
@@ -1616,62 +2184,54 @@ class ForecasterRecursive(ForecasterBase):
 
         rng = np.random.default_rng(seed=random_state)
         if use_binned_residuals:
-            sampled_residuals = {
-                k: v[rng.integers(low=0, high=len(v), size=(steps, n_boot))]
-                for k, v in residuals_by_bin.items()
-            }
+            # Create 3D array with sampled residuals: (n_bins, steps, n_boot)
+            n_bins = len(residuals_by_bin)
+            sampled_residuals = np.stack(
+                [
+                    residuals_by_bin[k][
+                        rng.integers(
+                            low=0, high=len(residuals_by_bin[k]), size=(steps, n_boot)
+                        )
+                    ]
+                    for k in range(n_bins)
+                ],
+                axis=0,
+            )
         else:
             sampled_residuals = residuals[
                 rng.integers(low=0, high=len(residuals), size=(steps, n_boot))
             ]
-        
-        boot_columns = []
-        boot_predictions = np.full(
-                               shape      = (steps, n_boot),
-                               fill_value = np.nan,
-                               order      = 'F',
-                               dtype      = float
-                           )
+
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", 
                 message="X does not have valid feature names", 
                 category=UserWarning
             )
-            for i in range(n_boot):
+            boot_predictions = self._recursive_predict_bootstrapping(
+                steps                = steps,
+                last_window_values   = last_window_values,
+                exog_values          = exog_values,
+                calendar_values      = calendar_values,
+                sampled_residuals    = sampled_residuals,
+                use_binned_residuals = use_binned_residuals,
+                n_boot               = n_boot
+            )
 
-                if use_binned_residuals:
-                    boot_sampled_residuals = {
-                        k: v[:, i]
-                        for k, v in sampled_residuals.items()
-                    }
-                else:
-                    boot_sampled_residuals = sampled_residuals[:, i]
-
-                boot_columns.append(f"pred_boot_{i}")
-                boot_predictions[:, i] = self._recursive_predict(
-                    steps                = steps,
-                    last_window_values   = last_window_values,
-                    exog_values          = exog_values,
-                    residuals            = boot_sampled_residuals,
-                    use_binned_residuals = use_binned_residuals,
-                )
-
-        if self.differentiation is not None:
+        if differentiator is not None:
             boot_predictions = (
-                self.differentiator.inverse_transform_next_window(boot_predictions)
+                differentiator.inverse_transform_next_window(boot_predictions)
             )
         
         if self.transformer_y:
-            boot_predictions = np.apply_along_axis(
-                                   func1d            = transform_numpy,
-                                   axis              = 0,
-                                   arr               = boot_predictions,
+            boot_predictions = transform_numpy(
+                                   array             = boot_predictions,
                                    transformer       = self.transformer_y,
                                    fit               = False,
                                    inverse_transform = True
                                )
 
+        boot_columns = [f"pred_boot_{i}" for i in range(n_boot)]
         boot_predictions = pd.DataFrame(
                                data    = boot_predictions,
                                index   = prediction_index,
@@ -1741,8 +2301,10 @@ class ForecasterRecursive(ForecasterBase):
         (
             last_window_values,
             exog_values,
+            calendar_values,
             prediction_index,
-            steps
+            steps,
+            differentiator
         ) = self._create_predict_inputs(
                 steps                   = steps,
                 last_window             = last_window,
@@ -1768,7 +2330,8 @@ class ForecasterRecursive(ForecasterBase):
             predictions = self._recursive_predict(
                               steps              = steps,
                               last_window_values = last_window_values,
-                              exog_values        = exog_values
+                              exog_values        = exog_values,
+                              calendar_values    = calendar_values
                           )
         
         if use_binned_residuals:
@@ -1781,21 +2344,22 @@ class ForecasterRecursive(ForecasterBase):
             correction_factor = replace_func(predictions_bin)
         else:
             correction_factor = np.quantile(np.abs(residuals), nominal_coverage)
-            
+
+        if differentiator is not None:
+            predictions = differentiator.inverse_transform_next_window(predictions)
+            correction_factor = scale_correction_factor_differentiation(
+                correction_factor     = correction_factor,
+                steps                 = len(predictions),
+                differentiation_order = self.differentiation
+            )
+
         lower_bound = predictions - correction_factor
         upper_bound = predictions + correction_factor
         predictions = np.column_stack([predictions, lower_bound, upper_bound])
-
-        if self.differentiation is not None:
-            predictions = (
-                self.differentiator.inverse_transform_next_window(predictions)
-            )
         
         if self.transformer_y:
-            predictions = np.apply_along_axis(
-                              func1d            = transform_numpy,
-                              axis              = 0,
-                              arr               = predictions,
+            predictions = transform_numpy(
+                              array             = predictions,
                               transformer       = self.transformer_y,
                               fit               = False,
                               inverse_transform = True
@@ -1809,17 +2373,19 @@ class ForecasterRecursive(ForecasterBase):
 
         return predictions
 
+    @manage_warnings
     def predict_interval(
         self,
         steps: int | str | pd.Timestamp,
         last_window: pd.Series | pd.DataFrame | None = None,
         exog: pd.Series | pd.DataFrame | None = None,
         method: str = 'bootstrapping',
-        interval: float | list[float] | tuple[float] = [5, 95],
+        interval: float | list[float] | tuple[float] = [0.05, 0.95],
         n_boot: int = 250,
         use_in_sample_residuals: bool = True,
         use_binned_residuals: bool = True,
-        random_state: int = 123
+        random_state: int = 123,
+        suppress_warnings: bool = False
     ) -> pd.DataFrame:
         """
         Predict n steps ahead and estimate prediction intervals using either 
@@ -1848,18 +2414,22 @@ class ForecasterRecursive(ForecasterBase):
             intervals [1]_.
             - 'conformal': Employs the conformal prediction split method for 
             interval estimation [2]_.
-        interval : float, list, tuple, default [5, 95]
+        interval : float, list, tuple, default [0.05, 0.95]
             Confidence level of the prediction interval. Interpretation depends 
             on the method used:
             
             - If `float`, represents the nominal (expected) coverage (between 0 
-            and 1). For instance, `interval=0.95` corresponds to `[2.5, 97.5]` 
-            percentiles.
-            - If `list` or `tuple`, defines the exact percentiles to compute, which 
-            must be between 0 and 100 inclusive. For example, interval 
-            of 95% should be as `interval = [2.5, 97.5]`.
+            and 1). For instance, `interval=0.95` corresponds to `[0.025, 0.975]` 
+            quantiles.
+            - If `list` or `tuple`, defines the exact quantiles to compute, which 
+            must be between 0 and 1 inclusive. For example, interval 
+            of 95% should be as `interval = [0.025, 0.975]`.
             - When using `method='conformal'`, the interval must be a float or 
             a list/tuple defining a symmetric interval.
+
+            **Changed in version 0.23.0:** `interval` is now expressed as
+            quantiles (0-1) instead of percentiles (0-100). Passing percentiles
+            is deprecated and emits a `FutureWarning`.
         n_boot : int, default 250
             Number of bootstrapping iterations to perform when estimating prediction
             intervals.
@@ -1875,6 +2445,10 @@ class ForecasterRecursive(ForecasterBase):
             If `False`, residuals are selected randomly.
         random_state : int, default 123
             Seed for the random number generator to ensure reproducibility.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the prediction 
+            process. See skforecast.exceptions.warn_skforecast_categories for more
+            information.
 
         Returns
         -------
@@ -1898,8 +2472,9 @@ class ForecasterRecursive(ForecasterBase):
         if method == "bootstrapping":
             
             if isinstance(interval, (list, tuple)):
+                interval = _normalize_interval_scale(interval)
                 check_interval(interval=interval, ensure_symmetric_intervals=False)
-                interval = np.array(interval) / 100
+                interval = np.array(interval)
             else:
                 check_interval(alpha=interval, alpha_literal='interval')
                 interval = np.array([0.5 - interval / 2, 0.5 + interval / 2])
@@ -1911,14 +2486,16 @@ class ForecasterRecursive(ForecasterBase):
                                    n_boot                  = n_boot,
                                    random_state            = random_state,
                                    use_in_sample_residuals = use_in_sample_residuals,
-                                   use_binned_residuals    = use_binned_residuals
+                                   use_binned_residuals    = use_binned_residuals,
+                                   suppress_warnings       = suppress_warnings
                                )
 
             predictions = self.predict(
-                              steps        = steps,
-                              last_window  = last_window,
-                              exog         = exog,
-                              check_inputs = False
+                              steps             = steps,
+                              last_window       = last_window,
+                              exog              = exog,
+                              check_inputs      = False,
+                              suppress_warnings = suppress_warnings
                           )
             
             predictions_interval = boot_predictions.quantile(q=interval, axis=1).transpose()
@@ -1928,8 +2505,9 @@ class ForecasterRecursive(ForecasterBase):
         elif method == 'conformal':
 
             if isinstance(interval, (list, tuple)):
+                interval = _normalize_interval_scale(interval)
                 check_interval(interval=interval, ensure_symmetric_intervals=True)
-                nominal_coverage = (interval[1] - interval[0]) / 100
+                nominal_coverage = interval[1] - interval[0]
             else:
                 check_interval(alpha=interval, alpha_literal='interval')
                 nominal_coverage = interval
@@ -1949,7 +2527,7 @@ class ForecasterRecursive(ForecasterBase):
 
         return predictions
 
-
+    @manage_warnings
     def predict_quantiles(
         self,
         steps: int | str | pd.Timestamp,
@@ -1960,6 +2538,7 @@ class ForecasterRecursive(ForecasterBase):
         use_in_sample_residuals: bool = True,
         use_binned_residuals: bool = True,
         random_state: int = 123,
+        suppress_warnings: bool = False
     ) -> pd.DataFrame:
         """
         Calculate the specified quantiles for each step. After generating 
@@ -1999,6 +2578,10 @@ class ForecasterRecursive(ForecasterBase):
             If `False`, residuals are selected randomly.
         random_state : int, default 123
             Seed for the random number generator to ensure reproducibility.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the prediction 
+            process. See skforecast.exceptions.warn_skforecast_categories for more
+            information.
 
         Returns
         -------
@@ -2021,7 +2604,8 @@ class ForecasterRecursive(ForecasterBase):
                                n_boot                  = n_boot,
                                random_state            = random_state,
                                use_in_sample_residuals = use_in_sample_residuals,
-                               use_binned_residuals    = use_binned_residuals
+                               use_binned_residuals    = use_binned_residuals,
+                               suppress_warnings       = suppress_warnings
                            )
 
         predictions = boot_predictions.quantile(q=quantiles, axis=1).transpose()
@@ -2029,7 +2613,7 @@ class ForecasterRecursive(ForecasterBase):
 
         return predictions
 
-
+    @manage_warnings
     def predict_dist(
         self,
         steps: int | str | pd.Timestamp,
@@ -2040,6 +2624,7 @@ class ForecasterRecursive(ForecasterBase):
         use_in_sample_residuals: bool = True,
         use_binned_residuals: bool = True,
         random_state: int = 123,
+        suppress_warnings: bool = False
     ) -> pd.DataFrame:
         """
         Fit a given probability distribution for each step. After generating 
@@ -2079,6 +2664,10 @@ class ForecasterRecursive(ForecasterBase):
             If `False`, residuals are selected randomly.
         random_state : int, default 123
             Seed for the random number generator to ensure reproducibility.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings are suppressed during execution.
+            See `skforecast.exceptions.warn_skforecast_categories` for the
+            list of warnings that are suppressed.
 
         Returns
         -------
@@ -2105,7 +2694,8 @@ class ForecasterRecursive(ForecasterBase):
                           n_boot                  = n_boot,
                           random_state            = random_state,
                           use_in_sample_residuals = use_in_sample_residuals,
-                          use_binned_residuals    = use_binned_residuals
+                          use_binned_residuals    = use_binned_residuals,
+                          suppress_warnings       = suppress_warnings
                       )       
 
         param_names = [
@@ -2122,14 +2712,14 @@ class ForecasterRecursive(ForecasterBase):
 
         return predictions
 
-
     def set_params(
         self, 
         params: dict[str, object]
     ) -> None:
         """
         Set new values to the parameters of the scikit-learn model stored in the
-        forecaster.
+        forecaster. After calling this method, the forecaster is reset to an 
+        unfitted state. The `fit` method must be called before prediction.
         
         Parameters
         ----------
@@ -2142,29 +2732,9 @@ class ForecasterRecursive(ForecasterBase):
         
         """
 
-        self.regressor = clone(self.regressor)
-        self.regressor.set_params(**params)
-
-    def set_fit_kwargs(
-        self, 
-        fit_kwargs: dict[str, object]
-    ) -> None:
-        """
-        Set new values for the additional keyword arguments passed to the `fit` 
-        method of the regressor.
-        
-        Parameters
-        ----------
-        fit_kwargs : dict
-            Dict of the form {"argument": new_value}.
-
-        Returns
-        -------
-        None
-        
-        """
-
-        self.fit_kwargs = check_select_fit_kwargs(self.regressor, fit_kwargs=fit_kwargs)
+        self.estimator = clone(self.estimator)
+        self.estimator.set_params(**params)
+        self.is_fitted = False
 
     def set_lags(
         self, 
@@ -2198,6 +2768,10 @@ class ForecasterRecursive(ForecasterBase):
             )
         
         self.lags, self.lags_names, self.max_lag = initialize_lags(type(self).__name__, lags)
+        self.lags_are_contiguous = (
+            self.lags is not None
+            and np.array_equal(self.lags, np.arange(1, self.max_lag + 1))
+        )
         self.window_size = max(
             [ws for ws in [self.max_lag, self.max_size_window_features] 
              if ws is not None]
@@ -2250,11 +2824,34 @@ class ForecasterRecursive(ForecasterBase):
             self.window_size += self.differentiation
             self.differentiator.set_params(window_size=self.window_size)
 
+    def set_fit_kwargs(
+        self, 
+        fit_kwargs: dict[str, object]
+    ) -> None:
+        """
+        Set new values for the additional keyword arguments passed to the `fit` 
+        method of the estimator.
+        
+        Parameters
+        ----------
+        fit_kwargs : dict
+            Dict of the form {"argument": new_value}.
+
+        Returns
+        -------
+        None
+        
+        """
+
+        self.fit_kwargs = check_select_fit_kwargs(self.estimator, fit_kwargs=fit_kwargs)
+
+    @manage_warnings
     def set_in_sample_residuals(
         self,
         y: pd.Series,
         exog: pd.Series | pd.DataFrame | None = None,
-        random_state: int = 123
+        random_state: int = 123,
+        suppress_warnings: bool = False
     ) -> None:
         """
         Set in-sample residuals in case they were not calculated during the
@@ -2287,6 +2884,10 @@ class ForecasterRecursive(ForecasterBase):
             that y[i] is regressed on exog[i].
         random_state : int, default 123
             Sets a seed to the random sampling for reproducible output.
+        suppress_warnings : bool, default False
+            If `True`, skforecast warnings will be suppressed during the sampling 
+            process. See skforecast.exceptions.warn_skforecast_categories for more
+            information.
 
         Returns
         -------
@@ -2300,9 +2901,9 @@ class ForecasterRecursive(ForecasterBase):
                 "arguments before using `set_in_sample_residuals()`."
             )
         
-        check_y(y=y)
-        y_index_range = preprocess_y(
-            y=y, return_values=False, suppress_warnings=True
+        check_y(y=y, allow_nan=True)
+        y_index_range = check_extract_values_and_index(
+            data=y, data_label='`y`', return_values=False
         )[1][[0, -1]]
         if not y_index_range.equals(self.training_range_):
             raise IndexError(
@@ -2316,6 +2917,9 @@ class ForecasterRecursive(ForecasterBase):
         (
             X_train,
             y_train,
+            _,
+            _,
+            _,
             _,
             _,
             _,
@@ -2333,9 +2937,17 @@ class ForecasterRecursive(ForecasterBase):
                 f"    Current output  : {X_train_features_names_out_}"
             )
 
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="X does not have valid feature names",
+                category=UserWarning
+            )
+            y_pred = self.estimator.predict(X_train).ravel()
+        
         self._binning_in_sample_residuals(
-            y_true                    = y_train.to_numpy(),
-            y_pred                    = self.regressor.predict(X_train).ravel(),
+            y_true                    = y_train,
+            y_pred                    = y_pred,
             store_in_sample_residuals = True,
             random_state              = random_state
         )
@@ -2421,8 +3033,6 @@ class ForecasterRecursive(ForecasterBase):
                     "`y_true` and `y_pred` must have the same index."
                 )
         
-        y_true = deepcopy(y_true)
-        y_pred = deepcopy(y_pred)
         if not isinstance(y_pred, np.ndarray):
             y_pred = y_pred.to_numpy()
         if not isinstance(y_true, np.ndarray):
@@ -2531,8 +3141,8 @@ class ForecasterRecursive(ForecasterBase):
         sort_importance: bool = True
     ) -> pd.DataFrame:
         """
-        Return feature importances of the regressor stored in the forecaster.
-        Only valid when regressor stores internally the feature importances in the
+        Return feature importances of the estimator stored in the forecaster.
+        Only valid when estimator stores internally the feature importances in the
         attribute `feature_importances_` or `coef_`. Otherwise, returns `None`.
 
         Parameters
@@ -2553,10 +3163,10 @@ class ForecasterRecursive(ForecasterBase):
                 "arguments before using `get_feature_importances()`."
             )
 
-        if isinstance(self.regressor, Pipeline):
-            estimator = self.regressor[-1]
+        if isinstance(self.estimator, Pipeline):
+            estimator = self.estimator[-1]
         else:
-            estimator = self.regressor
+            estimator = self.estimator
 
         if hasattr(estimator, 'feature_importances_'):
             feature_importances = estimator.feature_importances_
@@ -2564,9 +3174,9 @@ class ForecasterRecursive(ForecasterBase):
             feature_importances = estimator.coef_
         else:
             warnings.warn(
-                f"Impossible to access feature importances for regressor of type "
+                f"Impossible to access feature importances for estimator of type "
                 f"{type(estimator)}. This method is only valid when the "
-                f"regressor stores internally the feature importances in the "
+                f"estimator stores internally the feature importances in the "
                 f"attribute `feature_importances_` or `coef_`."
             )
             feature_importances = None

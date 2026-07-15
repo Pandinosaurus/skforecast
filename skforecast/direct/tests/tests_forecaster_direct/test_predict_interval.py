@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
-from skforecast.exceptions import ResidualsUsageWarning
 from skforecast.direct import ForecasterDirect
 
 # Fixtures
@@ -19,7 +18,9 @@ def test_check_interval_ValueError_when_method_is_not_valid_method():
     """
     Check ValueError is raised when `method` is not 'bootstrapping' or 'conformal'.
     """
-    forecaster = ForecasterDirect(LinearRegression(), steps=2, lags=3)
+    forecaster = ForecasterDirect(
+        estimator=LinearRegression(), lags=2, steps=3
+    )
     forecaster.fit(y=pd.Series(np.arange(10)), store_in_sample_residuals=True)
 
     method = 'not_valid_method'
@@ -30,18 +31,41 @@ def test_check_interval_ValueError_when_method_is_not_valid_method():
         forecaster.predict_interval(steps=1, method=method)
 
 
-@pytest.mark.parametrize("interval", 
-                         [0.90, [5, 95], (5, 95)], 
-                         ids = lambda value: f'interval: {value}')
-def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_True_exog_and_transformer(interval):
+# TODO: Remove in skforecast 0.25.0 when percentile support is removed.
+@pytest.mark.parametrize("method", 
+                         ['bootstrapping', 'conformal'], 
+                         ids = lambda value: f'method: {value}')
+def test_predict_interval_percentile_and_quantile_scales_are_equivalent(method):
     """
-    Test output of predict_interval when regressor is LinearRegression,
+    Check that the legacy percentile scale [5, 95] produces the same output as
+    the new quantile scale [0.05, 0.95].
+    """
+    forecaster = ForecasterDirect(LinearRegression(), lags=3, steps=3)
+    forecaster.fit(y=pd.Series(np.arange(10)), store_in_sample_residuals=True)
+
+    with pytest.warns(FutureWarning):
+        results_percentile = forecaster.predict_interval(
+            steps=3, method=method, interval=[5, 95], use_binned_residuals=False
+        )
+    results_quantile = forecaster.predict_interval(
+        steps=3, method=method, interval=[0.05, 0.95], use_binned_residuals=False
+    )
+
+    pd.testing.assert_frame_equal(results_percentile, results_quantile)
+
+
+@pytest.mark.parametrize("interval", 
+                         [0.90, [0.05, 0.95], (0.05, 0.95)], 
+                         ids = lambda value: f'interval: {value}')
+def test_predict_interval_output_when_in_sample_residuals_exog_and_transformer(interval):
+    """
+    Test output of predict_interval when estimator is LinearRegression,
     2 steps are predicted, using in-sample residuals, exog is included and both
     inputs are transformed.
     """
 
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      steps            = 2,
                      lags             = 3,
                      transformer_y    = StandardScaler(),
@@ -72,13 +96,13 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_
 
 def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_in_sample_residuals_False_exog_and_transformer():
     """
-    Test output of predict_interval when regressor is LinearRegression,
+    Test output of predict_interval when estimator is LinearRegression,
     2 steps are predicted, using out-sample residuals, exog is included and both
     inputs are transformed.
     """
 
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      steps            = 2,
                      lags             = 3,
                      transformer_y    = StandardScaler(),
@@ -88,7 +112,7 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_
     forecaster.out_sample_residuals_ = forecaster.in_sample_residuals_
     results = forecaster.predict_interval(
                   steps                   = 2,
-                  interval                = (5, 95),
+                  interval                = (0.05, 0.95),
                   exog                    = exog_predict,
                   n_boot                  = 250,
                   use_in_sample_residuals = False,
@@ -107,18 +131,18 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_2_
 
 def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_5_in_sample_residuals_is_True_binned_residuals_is_True():
     """
-    Test output when regressor is LinearRegression 5 step ahead is predicted
+    Test output when estimator is LinearRegression 5 step ahead is predicted
     using in sample binned residuals.
     """
     forecaster = ForecasterDirect(
-                     regressor     = LinearRegression(),
+                     estimator     = LinearRegression(),
                      steps         = 5,
                      lags          = 3,
                      transformer_y = StandardScaler()
                  )
     forecaster.fit(y=y, store_in_sample_residuals=True)
     results = forecaster.predict_interval(
-        steps=5, interval=(5, 95), use_in_sample_residuals=True, use_binned_residuals=True
+        steps=5, interval=(0.05, 0.95), use_in_sample_residuals=True, use_binned_residuals=True
     )
 
     expected = pd.DataFrame(
@@ -138,11 +162,11 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_5_
 
 def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_5_in_sample_residuals_is_False_binned_residuals_is_True():
     """
-    Test output when regressor is LinearRegression, steps=5, use_in_sample_residuals=False,
+    Test output when estimator is LinearRegression, steps=5, use_in_sample_residuals=False,
     binned_residuals=True.
     """
     forecaster = ForecasterDirect(
-                     regressor        = LinearRegression(),
+                     estimator        = LinearRegression(),
                      steps            = 5,
                      lags             = 3,
                      transformer_y    = StandardScaler(),
@@ -151,7 +175,7 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_5_
     forecaster.fit(y=y, store_in_sample_residuals=True)
     forecaster.out_sample_residuals_by_bin_ = forecaster.in_sample_residuals_by_bin_
     results = forecaster.predict_interval(
-        steps=5, interval=(5, 95), use_in_sample_residuals=False, use_binned_residuals=True
+        steps=5, interval=(0.05, 0.95), use_in_sample_residuals=False, use_binned_residuals=True
     )
 
     expected = pd.DataFrame(
@@ -170,11 +194,11 @@ def test_predict_interval_output_when_forecaster_is_LinearRegression_steps_is_5_
 
 
 @pytest.mark.parametrize("interval", 
-                         [0.95, (2.5, 97.5)], 
+                         [0.95, (0.025, 0.975)], 
                          ids = lambda value: f'interval: {value}')
-def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_with_transform_y(interval):
+def test_predict_interval_conformal_output_when_transform_y(interval):
     """
-    Test predict output when using LinearRegression as regressor and StandardScaler
+    Test predict output when using LinearRegression as estimator and StandardScaler
     and conformal prediction.
     """
     y = pd.Series(
@@ -183,7 +207,7 @@ def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_wi
                       -0.61, -0.88])
         )
     forecaster = ForecasterDirect(
-                     regressor     = LinearRegression(),
+                     estimator     = LinearRegression(),
                      steps         = 3,
                      lags          = 3,
                      transformer_y = StandardScaler()
@@ -208,11 +232,11 @@ def test_predict_interval_conformal_output_when_regressor_is_LinearRegression_wi
 
 
 @pytest.mark.parametrize("interval", 
-                         [0.95, (2.5, 97.5)], 
+                         [0.95, (0.025, 0.975)], 
                          ids = lambda value: f'interval: {value}')
 def test_predict_interval_conformal_output_when_binned_residuals(interval):
     """
-    Test predict output when using LinearRegression as regressor and StandardScaler
+    Test predict output when using LinearRegression as estimator and StandardScaler
     and conformal prediction with binned residuals.
     """
     y = pd.Series(
@@ -221,7 +245,7 @@ def test_predict_interval_conformal_output_when_binned_residuals(interval):
                       -0.61, -0.88])
         )
     forecaster = ForecasterDirect(
-                     regressor     = LinearRegression(),
+                     estimator     = LinearRegression(),
                      steps         = 3,
                      lags          = 3,
                      transformer_y = StandardScaler()

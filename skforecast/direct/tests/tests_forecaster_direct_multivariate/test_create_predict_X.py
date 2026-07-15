@@ -42,8 +42,9 @@ def test_create_predict_X_TypeError_when_steps_list_contain_floats(steps):
     """
     Test create_predict_X TypeError when steps is a list with floats.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
     forecaster.fit(series=series)
 
     err_msg = re.escape(
@@ -58,8 +59,9 @@ def test_create_predict_X_NotFittedError_when_fitted_is_False():
     """
     Test NotFittedError is raised when fitted is False.
     """
-    forecaster = ForecasterDirectMultiVariate(LinearRegression(), level='l1',
-                                               lags=3, steps=3)
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', lags=3, steps=3
+    )
 
     err_msg = re.escape(
         "This Forecaster instance is not fitted yet. Call `fit` with "
@@ -76,7 +78,7 @@ def test_create_predict_X_output(steps):
     Test create_predict_X output.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', lags=3, steps=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', lags=3, steps=3, transformer_series=None
     )
     forecaster.fit(series=series)
     results = forecaster.create_predict_X(steps=steps)
@@ -103,7 +105,7 @@ def test_create_predict_X_output_when_list_interspersed():
     a list with interspersed steps.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l2', lags=3, steps=5, transformer_series=None
+        estimator=LinearRegression(), level='l2', lags=3, steps=5, transformer_series=None
     )
     forecaster.fit(series=series)
     results = forecaster.create_predict_X(steps=[1, 4])
@@ -131,7 +133,7 @@ def test_create_predict_X_output_when_different_lags():
     lags configuration for each series.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l2', lags={'l1': 5, 'l2': [1, 7]}, 
+        estimator=LinearRegression(), level='l2', lags={'l1': 5, 'l2': [1, 7]}, 
         steps=3, transformer_series=None
     )
     forecaster.fit(series=series)
@@ -160,7 +162,7 @@ def test_create_predict_X_output_when_lags_dict_with_None_in_level_lags():
     dict and level has None lags configuration.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l2', lags={'l1': 5, 'l2': None}, 
+        estimator=LinearRegression(), level='l2', lags={'l1': 5, 'l2': None}, 
         steps=3, transformer_series=None
     )
     forecaster.fit(series=series)
@@ -187,7 +189,7 @@ def test_create_predict_X_output_when_lags_dict_with_None_but_no_in_level():
     dict with None values.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', lags={'l1': 5, 'l2': None}, 
+        estimator=LinearRegression(), level='l1', lags={'l1': 5, 'l2': None}, 
         steps=3, transformer_series=None
     )
     forecaster.fit(series=series)
@@ -213,7 +215,7 @@ def test_create_predict_X_output_when_last_window():
     Test create_predict_X output when external last_window.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', lags=3, steps=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', lags=3, steps=3, transformer_series=None
     )
     forecaster.fit(series=series)
     last_window = pd.DataFrame(
@@ -246,7 +248,7 @@ def test_create_predict_X_output_when_exog():
     Test create_predict_X output when exog.
     """
     forecaster = ForecasterDirectMultiVariate(
-        LinearRegression(), level='l1', lags=3, steps=3, transformer_series=None
+        estimator=LinearRegression(), level='l1', lags=3, steps=3, transformer_series=None
     )
     forecaster.fit(series=series.iloc[:40,], exog=exog.iloc[:40, 0])
     results = forecaster.create_predict_X(steps=None, exog=exog.iloc[40:43, 0])
@@ -286,7 +288,7 @@ def test_create_predict_X_output_with_transform_series():
     Test create_predict_X output when StandardScaler.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = 5,
                      steps              = 5,
@@ -321,7 +323,7 @@ def test_create_predict_X_output_with_transform_series_as_dict():
     is a dict with 2 different transformers.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l2',
                      lags               = 5,
                      steps              = 5,
@@ -358,7 +360,7 @@ def test_create_predict_X_output_with_transform_series_and_transform_exog(n_jobs
     as transformer_series and transformer_exog as transformer_exog.
     """
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = 5,
                      steps              = 5,
@@ -422,7 +424,7 @@ def test_create_predict_X_output_when_categorical_features_native_implementation
                        ).set_output(transform="pandas")
     
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = HistGradientBoostingRegressor(
+                     estimator          = HistGradientBoostingRegressor(
                                               categorical_features = categorical_features,
                                               random_state         = 123
                                           ),
@@ -506,7 +508,7 @@ def test_create_predict_X_when_categorical_features_auto_detect_LGBMRegressor():
                        ).set_output(transform="pandas")
     
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LGBMRegressor(verbose=-1, random_state=123),
+                     estimator          = LGBMRegressor(verbose=-1, random_state=123),
                      level              = 'l1',
                      lags               = 5,
                      steps              = 10,
@@ -544,17 +546,427 @@ def test_create_predict_X_when_categorical_features_auto_detect_LGBMRegressor():
                        0.66156434, 0.84650623, 0.55325734, 0.85445249, 0.38483781]
         },
         index = pd.RangeIndex(start=50, stop=60, step=1)
-    ).astype({'exog_2': int, 'exog_3': int}
-    ).astype({'exog_2': 'category', 'exog_3': 'category'})
+    )
     expected.insert(0, 'level', np.tile([forecaster.level], 10))
     
+    pd.testing.assert_frame_equal(results, expected)
+
+
+@pytest.mark.parametrize(
+    'categorical_features',
+    ['auto', ['exog_2', 'exog_3']],
+    ids=lambda cf: f'categorical_features: {cf}'
+)
+def test_create_predict_X_when_categorical_features_auto_and_explicit_no_transformer_exog(
+    categorical_features,
+):
+    """
+    Test create_predict_X when using internal categorical encoding
+    (`categorical_features='auto'` and explicit list) without `transformer_exog`.
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog['exog_1'],
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+
+    exog_pred = df_exog.copy()
+    exog_pred.index = pd.RangeIndex(start=50, stop=100)
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator            = LinearRegression(),
+                     level                = 'l1',
+                     lags                 = 5,
+                     steps                = 10,
+                     transformer_series   = None,
+                     transformer_exog     = None,
+                     categorical_features = categorical_features
+                 )
+    forecaster.fit(series=series, exog=df_exog)
+    results = forecaster.create_predict_X(steps=10, exog=exog_pred)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.51312815, 0.        , 0.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.66662455, 1.        , 1.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.10590849, 2.        , 2.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.13089495, 3.        , 3.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.32198061, 4.        , 4.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.66156434, 0.        , 0.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.84650623, 1.        , 1.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.55325734, 2.        , 2.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.85445249, 3.        , 3.        ],
+                [0.61289453, 0.51948512, 0.98555979, 0.48303426, 0.25045537,
+                 0.34345601, 0.2408559 , 0.39887629, 0.15112745, 0.6917018 ,
+                 0.38483781, 4.        , 4.        ]]),
+        columns = ['l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+                   'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+                   'exog_1', 'exog_2', 'exog_3'],
+        index = pd.RangeIndex(start=50, stop=60, step=1)
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 10))
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_categorical_features_auto_with_transformer_exog():
+    """
+    Test create_predict_X when using internal categorical encoding
+    (`categorical_features='auto'`) together with `transformer_exog`
+    (StandardScaler on numeric columns).
+    """
+    df_exog = pd.DataFrame(
+        {'exog_1': exog['exog_1'],
+         'exog_2': ['a', 'b', 'c', 'd', 'e'] * 10,
+         'exog_3': pd.Categorical(['F', 'G', 'H', 'I', 'J'] * 10)}
+    )
+
+    exog_pred = df_exog.copy()
+    exog_pred.index = pd.RangeIndex(start=50, stop=100)
+
+    transformer_exog_cat = make_column_transformer(
+                               (StandardScaler(), make_column_selector(dtype_include=np.number)),
+                               remainder='passthrough',
+                               verbose_feature_names_out=False,
+                           ).set_output(transform='pandas')
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator            = LinearRegression(),
+                     level                = 'l1',
+                     lags                 = 5,
+                     steps                = 10,
+                     transformer_series   = None,
+                     transformer_exog     = transformer_exog_cat,
+                     categorical_features = 'auto'
+                 )
+    forecaster.fit(series=series, exog=df_exog)
+    results = forecaster.create_predict_X(steps=10, exog=exog_pred)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                 -0.02551075,  0.        ,  0.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                  0.51927383,  1.        ,  1.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                 -1.47080194,  2.        ,  2.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                 -1.38212079,  3.        ,  3.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                 -0.70392558,  4.        ,  4.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                  0.5013143 ,  0.        ,  0.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                  1.15770422,  1.        ,  1.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                  0.1169145 ,  2.        ,  2.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                  1.18590684,  3.        ,  3.        ],
+                [ 0.61289453,  0.51948512,  0.98555979,  0.48303426,  0.25045537,
+                  0.34345601,  0.2408559 ,  0.39887629,  0.15112745,  0.6917018 ,
+                 -0.48083479,  4.        ,  4.        ]]),
+        columns = ['l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+                   'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+                   'exog_1', 'exog_2', 'exog_3'],
+        index = pd.RangeIndex(start=50, stop=60, step=1)
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 10))
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_with_exog_differentiation_is_1_and_transformer_series_steps_1():
+    """
+    Test create_predict_X when using LinearRegression as estimator and differentiation=1,
+    steps=1.
+    """
+
+    end_train = '2003-03-01 23:59:00'
+    arr = data.to_numpy(copy=True)
+    series_diff = pd.DataFrame(
+        {'l1': arr,
+         'l2': arr * 1.6},
+        index=data.index
+    )
+
+    # Simulated exogenous variable
+    rng = np.random.default_rng(9876)
+    exog_diff = pd.Series(
+        rng.normal(loc=0, scale=1, size=len(data)), index=data.index, name='exog'
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator       = LinearRegression(),
+                     level           = 'l1',
+                     lags            = [1, 5],
+                     steps           = 1,
+                     transformer_series = None,
+                     differentiation = 1
+                 )
+    forecaster.fit(series=series_diff.loc[:end_train], exog=exog_diff.loc[:end_train])
+    results = forecaster.create_predict_X(exog=exog_diff.loc[end_train:])
+
+    expected = pd.DataFrame(
+        data = np.array([
+            [0.07503713, -0.01018012, 0.12005941, -0.01628819, 1.16172882]]
+        ),
+        columns = ['l1_lag_1', 'l1_lag_5', 'l2_lag_1', 'l2_lag_5', 'exog'],
+        index = pd.date_range(start='2003-04-01', periods=1, freq='MS')
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 1))
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_with_exog_differentiation_is_1_and_transformer_series_steps_5():
+    """
+    Test create_predict_X when using LinearRegression as estimator and differentiation=1,
+    steps=5.
+    """
+
+    end_train = '2003-03-01 23:59:00'
+    arr = data.to_numpy(copy=True)
+    series_diff = pd.DataFrame(
+        {'l1': arr,
+         'l2': arr * 1.6},
+        index=data.index
+    )
+
+    # Simulated exogenous variable
+    rng = np.random.default_rng(9876)
+    exog_diff = pd.Series(
+        rng.normal(loc=0, scale=1, size=len(data)), index=data.index, name='exog'
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+                     estimator       = LinearRegression(),
+                     level           = 'l1',
+                     lags            = [1, 5],
+                     steps           = 5,
+                     transformer_series = None,
+                     differentiation = 1
+                 )
+    forecaster.fit(series=series_diff.loc[:end_train], exog=exog_diff.loc[:end_train])
+    results = forecaster.create_predict_X(exog=exog_diff.loc[end_train:])
+
+    expected = pd.DataFrame(
+        data = np.array([
+            [0.07503713, -0.01018012, 0.12005941, -0.01628819, 1.16172882],
+            [0.07503713, -0.01018012, 0.12005941, -0.01628819, 0.29468848],
+            [0.07503713, -0.01018012, 0.12005941, -0.01628819, -0.4399757],
+            [0.07503713, -0.01018012, 0.12005941, -0.01628819, 1.25008389],
+            [0.07503713, -0.01018012, 0.12005941, -0.01628819, 1.37496887]]
+        ),
+        columns = ['l1_lag_1', 'l1_lag_5', 'l2_lag_1', 'l2_lag_5', 'exog'],
+        index = pd.date_range(start='2003-04-01', periods=5, freq='MS')
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 5))
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_window_features_steps_1():
+    """
+    Test the output of create_predict_X when using window_features and exog
+    with datetime index and steps=1.
+    """
+    y_datetime = pd.Series(
+        np.arange(15), index=pd.date_range('2000-01-01', periods=15, freq='D'),
+        name='y', dtype=float
+    )
+    exog_datetime = pd.Series(
+        np.arange(100, 115), index=pd.date_range('2000-01-01', periods=15, freq='D'),
+        name='exog', dtype=float
+    )
+    exog_datetime_pred = pd.Series(
+        np.arange(115, 120), index=pd.date_range('2000-01-16', periods=5, freq='D'),
+        name='exog', dtype=float
+    )
+    rolling = RollingFeatures(stats=['mean', 'median'], window_sizes=[5, 5])
+    rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
+
+    series_wf = pd.DataFrame(
+        {'l1': y_datetime.values, 'l2': y_datetime.values * 1.5},
+        index=y_datetime.index, dtype=float
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', steps=1, lags=5,
+        window_features=[rolling, rolling_2], transformer_series=None
+    )
+    forecaster.fit(series=series_wf, exog=exog_datetime)
+    results = forecaster.create_predict_X(exog=exog_datetime_pred)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                    [14., 13., 12., 11., 10., 12., 12., 69.,
+                     21., 19.5, 18., 16.5, 15., 18., 18., 103.5, 115.]]),
+        index   = pd.date_range('2000-01-16', periods=1, freq='D'),
+        columns = ['l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+                   'l1_roll_mean_5', 'l1_roll_median_5', 'l1_roll_sum_6',
+                   'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+                   'l2_roll_mean_5', 'l2_roll_median_5', 'l2_roll_sum_6', 'exog']
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 1))
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_window_features_steps_10():
+    """
+    Test the output of create_predict_X when using window_features and exog
+    with datetime index and steps=10.
+    """
+    y_datetime = pd.Series(
+        np.arange(20), index=pd.date_range('2000-01-01', periods=20, freq='D'),
+        name='y', dtype=float
+    )
+    exog_datetime = pd.DataFrame(
+        {'exog_1': np.arange(100, 120, dtype=float),
+         'exog_2': np.arange(200, 220, dtype=float)},
+        index=pd.date_range('2000-01-01', periods=20, freq='D')
+    )
+    exog_datetime_pred = pd.DataFrame(
+        {'exog_1': np.arange(120, 130, dtype=float),
+         'exog_2': np.arange(220, 230, dtype=float)},
+        index=pd.date_range('2000-01-21', periods=10, freq='D')
+    )
+    rolling = RollingFeatures(stats=['mean', 'median'], window_sizes=[5, 5])
+    rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
+
+    series_wf = pd.DataFrame(
+        {'l1': y_datetime.values, 'l2': y_datetime.values * 1.5},
+        index=y_datetime.index, dtype=float
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', steps=10, lags=5,
+        window_features=[rolling, rolling_2], transformer_series=None
+    )
+    forecaster.fit(series=series_wf, exog=exog_datetime)
+    results = forecaster.create_predict_X(exog=exog_datetime_pred)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 120., 220.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 121., 221.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 122., 222.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 123., 223.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 124., 224.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 125., 225.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 126., 226.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 127., 227.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 128., 228.],
+                    [19., 18., 17., 16., 15., 17., 17., 99.,
+                     28.5, 27., 25.5, 24., 22.5, 25.5, 25.5, 148.5, 129., 229.]]),
+        index   = pd.date_range('2000-01-21', periods=10, freq='D'),
+        columns = ['l1_lag_1', 'l1_lag_2', 'l1_lag_3', 'l1_lag_4', 'l1_lag_5',
+                   'l1_roll_mean_5', 'l1_roll_median_5', 'l1_roll_sum_6',
+                   'l2_lag_1', 'l2_lag_2', 'l2_lag_3', 'l2_lag_4', 'l2_lag_5',
+                   'l2_roll_mean_5', 'l2_roll_median_5', 'l2_roll_sum_6',
+                   'exog_1', 'exog_2']
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 10))
+
+    pd.testing.assert_frame_equal(results, expected)
+
+
+def test_create_predict_X_when_window_features_and_lags_None_steps_10():
+    """
+    Test the output of create_predict_X when using window_features and exog
+    with datetime index, lags=None and steps=10.
+    """
+    y_datetime = pd.Series(
+        np.arange(20), index=pd.date_range('2000-01-01', periods=20, freq='D'),
+        name='y', dtype=float
+    )
+    exog_datetime = pd.DataFrame(
+        {'exog_1': np.arange(100, 120, dtype=float),
+         'exog_2': np.arange(200, 220, dtype=float)},
+        index=pd.date_range('2000-01-01', periods=20, freq='D')
+    )
+    exog_datetime_pred = pd.DataFrame(
+        {'exog_1': np.arange(120, 130, dtype=float),
+         'exog_2': np.arange(220, 230, dtype=float)},
+        index=pd.date_range('2000-01-21', periods=10, freq='D')
+    )
+    rolling = RollingFeatures(stats=['mean', 'median'], window_sizes=[5, 5])
+    rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
+
+    series_wf = pd.DataFrame(
+        {'l1': y_datetime.values, 'l2': y_datetime.values * 1.5},
+        index=y_datetime.index, dtype=float
+    )
+
+    forecaster = ForecasterDirectMultiVariate(
+        estimator=LinearRegression(), level='l1', steps=10, lags=None,
+        window_features=[rolling, rolling_2], transformer_series=None
+    )
+    forecaster.fit(series=series_wf, exog=exog_datetime)
+    results = forecaster.create_predict_X(exog=exog_datetime_pred)
+
+    expected = pd.DataFrame(
+        data = np.array([
+                    [17., 17., 99., 25.5, 25.5, 148.5, 120., 220.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 121., 221.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 122., 222.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 123., 223.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 124., 224.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 125., 225.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 126., 226.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 127., 227.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 128., 228.],
+                    [17., 17., 99., 25.5, 25.5, 148.5, 129., 229.]]),
+        index   = pd.date_range('2000-01-21', periods=10, freq='D'),
+        columns = ['l1_roll_mean_5', 'l1_roll_median_5', 'l1_roll_sum_6',
+                   'l2_roll_mean_5', 'l2_roll_median_5', 'l2_roll_sum_6',
+                   'exog_1', 'exog_2']
+    )
+    expected.insert(0, 'level', np.tile([forecaster.level], 10))
+
     pd.testing.assert_frame_equal(results, expected)
 
 
 def test_create_predict_X_same_predictions_as_predict():
     """
     Test create_predict_X matrix returns the same predictions as predict method
-    when passing to the regressor predict method.
+    when passing to the estimator predict method.
     """
 
     end_train = '2003-03-01 23:59:00'
@@ -574,7 +986,7 @@ def test_create_predict_X_same_predictions_as_predict():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = [1, 5],
                      window_features    = [rolling, rolling_2],
@@ -586,8 +998,8 @@ def test_create_predict_X_same_predictions_as_predict():
     forecaster.fit(series=series.loc[:end_train], exog=exog.loc[:end_train])
     X_predict = forecaster.create_predict_X(exog=exog.loc[end_train:]).drop(columns=['level'])
 
-    for i, step in enumerate(range(1, forecaster.steps + 1)):
-        results = forecaster.regressors_[step].predict(X_predict.iloc[[i]])
+    for i, step in enumerate(forecaster.steps):
+        results = forecaster.estimators_[step].predict(X_predict.iloc[[i]])
         expected = forecaster.predict(
             steps=[step], exog=exog.loc[end_train:]
         )[['pred']].to_numpy().item()
@@ -598,7 +1010,7 @@ def test_create_predict_X_same_predictions_as_predict():
 def test_create_predict_X_same_predictions_as_predict_transformers():
     """
     Test create_predict_X matrix returns the same predictions as predict method
-    when passing to the regressor predict method with transformation.
+    when passing to the estimator predict method with transformation.
     """
 
     end_train = '2003-03-01 23:59:00'
@@ -618,7 +1030,7 @@ def test_create_predict_X_same_predictions_as_predict_transformers():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = [1, 5],
                      window_features    = [rolling, rolling_2],
@@ -640,8 +1052,8 @@ def test_create_predict_X_same_predictions_as_predict_transformers():
     with pytest.warns(DataTransformationWarning, match = warn_msg):
         X_predict = forecaster.create_predict_X(exog=exog.loc[end_train:]).drop(columns=['level'])
 
-    for i, step in enumerate(range(1, forecaster.steps + 1)):
-        results = forecaster.regressors_[step].predict(X_predict.iloc[[i]])
+    for i, step in enumerate(forecaster.steps):
+        results = forecaster.estimators_[step].predict(X_predict.iloc[[i]])
         results = transform_numpy(
                       array             = results,
                       transformer       = forecaster.transformer_series_[forecaster.level],
@@ -655,7 +1067,7 @@ def test_create_predict_X_same_predictions_as_predict_transformers():
 def test_create_predict_X_same_predictions_as_predict_transformers_diff():
     """
     Test create_predict_X matrix returns the same predictions as predict method
-    when passing to the regressor predict method with transformation and differentiation.
+    when passing to the estimator predict method with transformation and differentiation.
     """
 
     end_train = '2003-03-01 23:59:00'
@@ -675,7 +1087,7 @@ def test_create_predict_X_same_predictions_as_predict_transformers_diff():
     rolling_2 = RollingFeatures(stats='sum', window_sizes=[6])
 
     forecaster = ForecasterDirectMultiVariate(
-                     regressor          = LinearRegression(),
+                     estimator          = LinearRegression(),
                      level              = 'l1',
                      lags               = [1, 5],
                      window_features    = [rolling, rolling_2],
@@ -697,8 +1109,8 @@ def test_create_predict_X_same_predictions_as_predict_transformers_diff():
     with pytest.warns(DataTransformationWarning, match = warn_msg):
         X_predict = forecaster.create_predict_X(exog=exog.loc[end_train:]).drop(columns=['level'])
 
-    for i, step in enumerate(range(1, forecaster.steps + 1)):
-        results = forecaster.regressors_[step].predict(X_predict.iloc[[i]])
+    for i, step in enumerate(forecaster.steps):
+        results = forecaster.estimators_[step].predict(X_predict.iloc[[i]])
         results = forecaster.differentiator_[forecaster.level].inverse_transform_next_window(results)
         results = transform_numpy(
                       array             = results,
